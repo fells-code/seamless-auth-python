@@ -101,5 +101,9 @@ bump the version, edit the changelog, or tag by hand:
   minor version while pre-1.0. `ci`, `chore`, `test`, `style` and `build` commits make no release.
 - Merging that PR tags `vX.Y.Z`, creates the GitHub release, then checks, builds and publishes the
   package to PyPI through trusted publishing (no token in the repository).
+- The release PR also bumps the package's own version in `uv.lock` (`extra-files` in
+  `release-please-config.json`), or `uv sync --locked` fails on main after every release.
+- If a publish fails after the release is tagged, fix the cause on main, then publish that tag by
+  hand: `gh workflow run release.yml -f tag=vX.Y.Z`. It checks the tag matches `pyproject.toml`.
 
 Pre-1.0: a breaking change is a minor bump, and 1.0 is a deliberate decision, not a side effect.
