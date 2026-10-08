@@ -187,3 +187,20 @@ def test_an_async_deliver_does_not_deadlock_under_asgi(api: FakeApi) -> None:
 
     assert status == 200
     assert got == ["a@b.test"]
+
+
+def test_the_django_console(api: FakeApi, client: Client) -> None:
+    api.on(
+        "GET",
+        "/console",
+        lambda _r: httpx2.Response(200, text="<html>", headers={"content-type": "text/html"}),
+    )
+    api.on("GET", "/console/assets/app.js", lambda _r: httpx2.Response(200, text="js"))
+
+    r = client.get("/console/")
+    assert r.status_code == 200
+    assert b"".join(r.streaming_content) == b"<html>"  # type: ignore[attr-defined]
+    r = client.get("/console/assets/app.js")
+    assert b"".join(r.streaming_content) == b"js"  # type: ignore[attr-defined]
+    assert client.get("/console/%2e%2e/jwks.json").status_code == 400
+    assert client.post("/console/x").status_code == 405

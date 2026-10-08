@@ -44,7 +44,14 @@ from django.views.decorators.csrf import csrf_exempt
 from ._adapter import MAX_BODY_BYTES, Adapter, CrossSiteRequest, Unauthenticated, User
 from ._http import AuthRequest, AuthResponse, Headers
 
-__all__ = ["auth_view", "get_adapter", "require_auth", "urlpatterns"]
+__all__ = [
+    "auth_view",
+    "console_urlpatterns",
+    "console_view",
+    "get_adapter",
+    "require_auth",
+    "urlpatterns",
+]
 
 _PATH_SAFE = "/:@!$&'()*+,;=-._~"
 _lock = threading.Lock()
@@ -84,6 +91,24 @@ def auth_view(request: HttpRequest, path: str = "") -> HttpResponse:
 
 
 urlpatterns = [re_path(r"^(?P<path>.*)$", auth_view, name="seamless-auth")]
+
+
+@csrf_exempt
+def console_view(request: HttpRequest, path: str = "") -> HttpResponse:
+    """The Seamless admin dashboard, proxied from the auth API so it shares the
+    auth routes' origin. Exempt from the CSRF middleware because it serves GET and
+    HEAD only and answers anything else 405 itself."""
+    return _response(
+        get_adapter().console(
+            request.method or "GET",
+            _relative_raw_path(request, path),
+            request.META.get("QUERY_STRING", ""),
+        )
+    )
+
+
+#: Include at ``console/``: ``path("console/", include(console_urlpatterns))``.
+console_urlpatterns = [re_path(r"^(?P<path>.*)$", console_view, name="seamless-console")]
 
 
 def require_auth(view: F) -> F:
