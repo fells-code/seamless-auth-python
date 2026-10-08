@@ -172,10 +172,12 @@ shares the origin and cookie scope of the `/auth` routes:
 ```python
 # FastAPI
 from seamless_auth.fastapi import console_router
+
 app.include_router(console_router(auth))  # /console
 
 # Django (urls.py)
 from seamless_auth.django import console_urlpatterns
+
 urlpatterns += [path("console/", include(console_urlpatterns))]
 ```
 
