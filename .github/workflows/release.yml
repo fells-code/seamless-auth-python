@@ -9,6 +9,9 @@
 # repository. The project's trusted publisher on PyPI names this repository, this
 # workflow file and the pypi environment.
 #
+# A release whose publish failed can be published again by hand: run this
+# workflow with the release's tag. It publishes that tag and nothing else.
+#
 # Release PRs are opened with the default GITHUB_TOKEN, so CI waits for approval
 # on them. They change only the version and the changelog, and the publish job
 # runs the full checks before it uploads.
@@ -17,6 +20,11 @@ name: release
 on:
   push:
     branches: [main]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: An existing release tag to publish (vX.Y.Z)
+        required: true
 
 permissions:
   contents: read
@@ -25,7 +33,7 @@ jobs:
   release-please:
     name: Release PR
     runs-on: ubuntu-latest
-    if: github.repository_owner == 'fells-code'
+    if: github.repository_owner == 'fells-code' && github.event_name == 'push'
     permissions:
       contents: write
       pull-requests: write
@@ -43,7 +51,9 @@ jobs:
   publish:
     name: Publish to PyPI
     needs: release-please
-    if: needs.release-please.outputs.release_created == 'true'
+    if: >-
+      !cancelled() && github.repository_owner == 'fells-code' &&
+      (needs.release-please.outputs.release_created == 'true' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
     environment:
       name: pypi
@@ -54,14 +64,25 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.release-please.outputs.tag_name }}
+          ref: ${{ inputs.tag || needs.release-please.outputs.tag_name }}
           persist-credentials: false
+      - name: The tag is a release of this version
+        env:
+          TAG: ${{ inputs.tag || needs.release-please.outputs.tag_name }}
+        run: |
+          echo "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$' || { echo "not a release tag: $TAG"; exit 1; }
+          git rev-parse -q --verify "refs/tags/$TAG" > /dev/null || { echo "no such tag: $TAG"; exit 1; }
+          version=$(grep -m1 '^version = ' pyproject.toml | cut -d'"' -f2)
+          [ "v$version" = "$TAG" ] || { echo "pyproject.toml says $version, tag is $TAG"; exit 1; }
       - uses: astral-sh/setup-uv@v10.2.0
         with:
           python-version: '3.13'
       - name: Checks
+        # Frozen: the locked dependencies exactly, without checking the project's
+        # own version in the lockfile, which a tag cut before release-please bumped
+        # uv.lock (v0.1.0) still has as the previous one. CI holds main to --locked.
         run: |
-          uv sync --locked
+          uv sync --frozen
           uv run ruff check .
           uv run mypy
           uv run pytest
