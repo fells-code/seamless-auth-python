@@ -29,7 +29,7 @@ from starlette.responses import Response, StreamingResponse
 from ._adapter import MAX_BODY_BYTES, Adapter, CrossSiteRequest, Unauthenticated, User
 from ._http import AuthRequest, AuthResponse, Headers
 
-__all__ = ["RequireUser", "auth_router"]
+__all__ = ["RequireUser", "auth_router", "console_router"]
 
 _METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]
 # What a path segment may keep when a raw path has to be rebuilt from a decoded one.
@@ -46,6 +46,21 @@ def auth_router(adapter: Adapter, *, prefix: str = "/auth") -> APIRouter:
         auth_request = await _auth_request(request, prefix)
         return _response(await run_in_threadpool(adapter.handle, auth_request))
 
+    router.add_api_route("/{path:path}", handle, methods=_METHODS)
+    return router
+
+
+def console_router(adapter: Adapter) -> APIRouter:
+    """The Seamless admin dashboard at /console, the path it is built against,
+    proxied from the auth API so it shares the auth routes' origin."""
+    router = APIRouter(prefix="/console", include_in_schema=False)
+
+    async def handle(request: Request) -> Response:
+        path = _relative_raw_path(request, "/console")
+        query = request.scope.get("query_string", b"").decode("latin-1")
+        return _response(await run_in_threadpool(adapter.console, request.method, path, query))
+
+    router.add_api_route("", handle, methods=_METHODS)
     router.add_api_route("/{path:path}", handle, methods=_METHODS)
     return router
 

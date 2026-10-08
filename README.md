@@ -164,6 +164,27 @@ auth = Adapter(..., deliver=deliver)
 An `async def` callback works too; under FastAPI it runs on the application's event loop. A
 delivery error answers the request with 502 `delivery_failed`.
 
+### The admin console
+
+The adapter can serve the Seamless admin dashboard from your API, proxied from the auth API, so it
+shares the origin and cookie scope of the `/auth` routes:
+
+```python
+# FastAPI
+from seamless_auth.fastapi import console_router
+app.include_router(console_router(auth))  # /console
+
+# Django (urls.py)
+from seamless_auth.django import console_urlpatterns
+urlpatterns += [path("console/", include(console_urlpatterns))]
+```
+
+It serves `GET` and `HEAD` only and forwards nothing but the method and path, so the browser's
+cookies never reach the upstream. It refuses any path that could leave the console (dot segments,
+encoded separators), and follows a redirect only while it stays inside the console on the auth API.
+When you serve it, add your API's origin to the auth server's `ORIGINS` so passkey ceremonies
+started in the console verify.
+
 ## How it runs
 
 The adapter is synchronous and thread-safe: one `Adapter` serves the whole process. Under FastAPI

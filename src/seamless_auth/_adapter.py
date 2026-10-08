@@ -11,7 +11,7 @@ import threading
 import time
 from collections.abc import Awaitable, Callable, Iterable, Iterator
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
 import httpx2
@@ -35,6 +35,9 @@ from ._jwks import BodyTooLarge, JwksCache, TokenError, read_limited
 from ._jwt import Claims, sign_hs256, str_claim, unverified_claims
 from ._manifest import ManifestRoute, ManifestSource, RouteMatch
 from ._refresh import Refresher, RefreshOutcome
+
+if TYPE_CHECKING:
+    from ._console import Console
 
 log = logging.getLogger("seamless_auth")
 
@@ -225,6 +228,7 @@ class Adapter:
         self._manifest = ManifestSource(url, self._client, not disable_manifest_fetch)
         self._refreshes = Refresher()
         self._proxy_token: tuple[str, float] | None = None
+        self._console: Console | None = None
 
     def __repr__(self) -> str:
         return f"Adapter(auth_server_url={self._config.auth_server_url!r})"
@@ -232,6 +236,18 @@ class Adapter:
     @property
     def config(self) -> Config:
         return self._config
+
+    def console(self, method: str, path: str, query: str = "") -> AuthResponse:
+        """Serves the Seamless admin dashboard, proxied from the auth API, so it
+        loads from the same origin as the cookie-based auth routes. ``path`` is the
+        raw path below /console. GET and HEAD only; nothing is forwarded but the
+        method and path, and no path can leave the console. Blocking: run it on a
+        worker thread from async code."""
+        from ._console import Console  # noqa: PLC0415  (imports this module)
+
+        if self._console is None:
+            self._console = Console(self)
+        return self._console.handle(method, path, query)
 
     # The request pipeline.
 

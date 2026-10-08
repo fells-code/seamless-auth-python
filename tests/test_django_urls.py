@@ -4,7 +4,7 @@ from django.http import HttpRequest, JsonResponse
 from django.urls import include, path
 from django.views.decorators.csrf import csrf_exempt
 
-from seamless_auth.django import require_auth, user_of
+from seamless_auth.django import console_urlpatterns, require_auth, user_of
 
 
 @require_auth
@@ -28,4 +28,5 @@ urlpatterns = [
     path("api/me-async", me_async),
     path("api/transfer", transfer),
     path("auth/", include("seamless_auth.django")),
+    path("console/", include(console_urlpatterns)),
 ]
