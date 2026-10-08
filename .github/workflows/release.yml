@@ -1,0 +1,69 @@
+# Releases with release-please (configured in release-please-config.json).
+#
+# On every push to main, release-please opens or updates a release PR with the
+# next version (pyproject.toml) and changelog, from the Conventional Commits since
+# the last release. Merging it tags vX.Y.Z and creates the GitHub release; the
+# publish job then checks, builds and uploads the package to PyPI.
+#
+# Publishing uses PyPI trusted publishing (OIDC): no PyPI token is stored in this
+# repository. The project's trusted publisher on PyPI names this repository, this
+# workflow file and the pypi environment.
+#
+# Release PRs are opened with the default GITHUB_TOKEN, so CI waits for approval
+# on them. They change only the version and the changelog, and the publish job
+# runs the full checks before it uploads.
+name: release
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  release-please:
+    name: Release PR
+    runs-on: ubuntu-latest
+    if: github.repository_owner == 'fells-code'
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+    steps:
+      - uses: googleapis/release-please-action@v5
+        id: release
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+  publish:
+    name: Publish to PyPI
+    needs: release-please
+    if: needs.release-please.outputs.release_created == 'true'
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/seamless-auth/
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.release-please.outputs.tag_name }}
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v10.2.0
+        with:
+          python-version: '3.13'
+      - name: Checks
+        run: |
+          uv sync --locked
+          uv run ruff check .
+          uv run mypy
+          uv run pytest
+      - run: uv build
+      - uses: pypa/gh-action-pypi-publish@v1.14.2
