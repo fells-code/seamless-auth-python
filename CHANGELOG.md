@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.2.1](https://github.com/fells-code/seamless-auth-python/compare/v0.2.0...v0.2.1) (2026-10-13)
+
+
+### Documentation
+
+* name the app-side service token SEAMLESS_SERVICE_TOKEN ([8872754](https://github.com/fells-code/seamless-auth-python/commit/887275490f3559d44e27c1673d2c2006c62dca6a))
+* name the app-side service token SEAMLESS_SERVICE_TOKEN ([034b7fa](https://github.com/fells-code/seamless-auth-python/commit/034b7faea1e08acb0fee117e34c9046fc8dd9545))
+
 ## [0.2.0](https://github.com/fells-code/seamless-auth-python/compare/v0.1.0...v0.2.0) (2026-10-08)
 
 
