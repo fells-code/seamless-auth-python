@@ -41,7 +41,7 @@ def adapter_options() -> dict[str, Any]:
         "auth_server_url": os.environ.get("AUTH_SERVER_URL", ""),
         "auth_server_issuer": os.environ.get("AUTH_SERVER_ISSUER") or None,
         "cookie_secret": os.environ.get("COOKIE_SIGNING_KEY", ""),
-        "service_secret": os.environ.get("API_SERVICE_TOKEN", ""),
+        "service_secret": os.environ.get("SEAMLESS_SERVICE_TOKEN", ""),
         "jwks_kid": os.environ.get("JWKS_KID") or None,
         "deliver": capture,
         "resolve_client_ip": one_trusted_hop,
