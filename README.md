@@ -39,7 +39,7 @@ from seamless_auth.fastapi import RequireUser, auth_router
 auth = Adapter(
     auth_server_url=os.environ["AUTH_SERVER_URL"],
     cookie_secret=os.environ["COOKIE_SECRET"],  # at least 32 bytes
-    service_secret=os.environ["SERVICE_SECRET"],  # the API's API_SERVICE_TOKEN
+    service_secret=os.environ["SEAMLESS_SERVICE_TOKEN"],  # the API's API_SERVICE_TOKEN value
     jwks_kid=os.environ["JWKS_KID"],
 )
 current_user = RequireUser(auth)
@@ -55,6 +55,9 @@ def me(user: User = Depends(current_user)):
     return {"id": user.id}
 ```
 
+The auth server reads the service token from `API_SERVICE_TOKEN` and your app reads it from
+`SEAMLESS_SERVICE_TOKEN`; both hold the same value.
+
 `RequireUser` answers 401 unless the request carries a session, and returns the `User`.
 
 ## Django
@@ -64,7 +67,7 @@ def me(user: User = Depends(current_user)):
 SEAMLESS_AUTH = {
     "auth_server_url": os.environ["AUTH_SERVER_URL"],
     "cookie_secret": os.environ["COOKIE_SECRET"],
-    "service_secret": os.environ["SERVICE_SECRET"],
+    "service_secret": os.environ["SEAMLESS_SERVICE_TOKEN"],
     "jwks_kid": os.environ["JWKS_KID"],
 }
 
@@ -117,7 +120,7 @@ JSON it would be a sign-in the user never made. The client SDKs already send JSO
 | `auth_server_issuer` | the URL | Expected `iss` of the API's tokens, when it differs from the URL you reach it at |
 | `audience` | the issuer | Expected `aud` of the API's tokens |
 | `cookie_secret` | required | Signs the session cookies (32 bytes or more) |
-| `service_secret` | required | The API's `API_SERVICE_TOKEN` (32 bytes or more) |
+| `service_secret` | required | The service token, read from `SEAMLESS_SERVICE_TOKEN` in the examples; the same value as the API's `API_SERVICE_TOKEN` (32 bytes or more) |
 | `jwks_kid` | `dev-main` | `kid` header on service tokens |
 | `cookie_domain` | none | Cookie `Domain` |
 | `insecure_cookies` | `False` | Drops `Secure`, for local development over HTTP |
@@ -209,7 +212,7 @@ one locally you need Docker, a checkout of `seamless-auth-api` and the `seamless
 
 ```bash
 PORT=8080 AUTH_SERVER_URL=http://localhost:5312 AUTH_SERVER_ISSUER=http://auth-api:5312 \
-  API_SERVICE_TOKEN=verify-dev-service-token-not-a-real-secret \
+  SEAMLESS_SERVICE_TOKEN=verify-dev-service-token-not-a-real-secret \
   COOKIE_SIGNING_KEY=verify-dev-service-token-not-a-real-secret JWKS_KID=dev-main \
   uv run python conformance/fastapi_app.py &   # or conformance/django_app.py
 

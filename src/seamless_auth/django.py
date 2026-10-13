@@ -6,7 +6,7 @@ Configure the adapter in settings, include its URLs, and guard views::
     SEAMLESS_AUTH = {
         "auth_server_url": env("AUTH_SERVER_URL"),
         "cookie_secret": env("COOKIE_SECRET"),
-        "service_secret": env("SERVICE_SECRET"),
+        "service_secret": env("SEAMLESS_SERVICE_TOKEN"),
         "jwks_kid": env("JWKS_KID"),
     }
 
