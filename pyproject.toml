@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "seamless-auth"
-version = "0.2.1"
+version = "0.2.2"
 description = "Seamless Auth server adapter for FastAPI and Django: cookie and bearer sessions in front of the Seamless Auth API"
 readme = "README.md"
 license = "Apache-2.0"
