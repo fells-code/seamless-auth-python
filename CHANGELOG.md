@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.2](https://github.com/fells-code/seamless-auth-python/compare/v0.2.1...v0.2.2) (2026-10-18)
+
+
+### Fixed
+
+* forward the pre-auth token on magic link verify and serve the confirm route ([#8](https://github.com/fells-code/seamless-auth-python/issues/8)) ([5994d28](https://github.com/fells-code/seamless-auth-python/commit/5994d28aa78a20e1d614949d3691487b2a25755e))
+
 ## [0.2.1](https://github.com/fells-code/seamless-auth-python/compare/v0.2.0...v0.2.1) (2026-10-13)
 
 
