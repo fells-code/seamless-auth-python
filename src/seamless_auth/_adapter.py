@@ -58,6 +58,11 @@ DELIVERY_SUBJECT = "seamless-auth-external-delivery"
 # token and never presents one that expires in flight.
 PROXY_REUSE = 45.0
 
+# The auth API consumes a magic link on the device that requested it, which it
+# recognises by that flow's pre-auth token. The token is optional: without it the
+# API asks for confirmation instead, so its absence is never a 401 here.
+_MAGIC_LINK_VERIFY = ("GET", "/magic-link/verify/{token}")
+
 _COOKIE_NAME = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
 _COOKIE_DOMAIN = re.compile(r"^[A-Za-z0-9.\-]+$")
 _TOKEN = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
@@ -428,6 +433,16 @@ class Adapter:
             return _error(401, f"Invalid or expired {name} cookie")
         return _error(401, f'Missing required cookie "{name}"')
 
+    def _optional_pre_auth(self, headers: Headers, bearer: bool) -> str | None:
+        if bearer:
+            token = _bearer_token(headers)
+        else:
+            name = self._config.cookie_name("preAuth")
+            token = str_claim(
+                read_cookie(self._config, headers, name, cookie_kind("preAuth")), "token"
+            )
+        return f"Bearer {token}" if token else None
+
     def _verify_session(self, session: Claims, typ: str) -> str:
         """Checks the token in a session response: signed by the auth API, of the
         expected type, and belonging to the subject the body names. Returns the
@@ -458,10 +473,15 @@ class Adapter:
         if body is not None and not _is_explicit_json(request.headers.get("content-type")):
             return _error(415, "unsupported_media_type")
 
-        credential = self._credential_for(request.headers, forwarded, route.credential, bearer)
-        if isinstance(credential, _Reply):
-            return credential
-        authorization, cookies = credential
+        authorization: str | None
+        cookies: list[CookieWrite]
+        if (route.method, route.path) == _MAGIC_LINK_VERIFY:
+            authorization, cookies = self._optional_pre_auth(request.headers, bearer), []
+        else:
+            credential = self._credential_for(request.headers, forwarded, route.credential, bearer)
+            if isinstance(credential, _Reply):
+                return credential
+            authorization, cookies = credential
 
         external = route.delivery and self._deliver is not None
         try:
