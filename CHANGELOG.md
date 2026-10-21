@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.2.3](https://github.com/fells-code/seamless-auth-python/compare/v0.2.2...v0.2.3) (2026-10-21)
+
+
+### Documentation
+
+* link the governance document and license pledge ([3478bcf](https://github.com/fells-code/seamless-auth-python/commit/3478bcf36492742ba1b4d1fc51d900bb9c50f943))
+* link the governance document and license pledge ([44fe697](https://github.com/fells-code/seamless-auth-python/commit/44fe697feef842946c9081ec13b916882f05c518))
+
 ## [0.2.2](https://github.com/fells-code/seamless-auth-python/compare/v0.2.1...v0.2.2) (2026-10-18)
 
 
