@@ -30,7 +30,7 @@ import functools
 import inspect
 import threading
 from collections.abc import Callable
-from typing import Any, Literal, TypeVar, cast
+from typing import Any, Literal, TypeVar, cast, overload
 from urllib.parse import quote, unquote
 
 from asgiref.sync import sync_to_async
@@ -41,7 +41,14 @@ from django.urls import re_path
 from django.utils.module_loading import import_string
 from django.views.decorators.csrf import csrf_exempt
 
-from ._adapter import MAX_BODY_BYTES, Adapter, CrossSiteRequest, Unauthenticated, User
+from ._adapter import (
+    MAX_BODY_BYTES,
+    Adapter,
+    CrossSiteRequest,
+    EnrollmentRequired,
+    Unauthenticated,
+    User,
+)
 from ._http import AuthRequest, AuthResponse, Headers
 
 __all__ = [
@@ -111,15 +118,32 @@ def console_view(request: HttpRequest, path: str = "") -> HttpResponse:
 console_urlpatterns = [re_path(r"^(?P<path>.*)$", console_view, name="seamless-console")]
 
 
-def require_auth(view: F) -> F:
+@overload
+def require_auth(view: F) -> F: ...
+@overload
+def require_auth(*, allow_recovery: bool = False) -> Callable[[F], F]: ...
+
+
+def require_auth(view: F | None = None, *, allow_recovery: bool = False) -> Any:
     """Answers 401 unless the request carries a valid session, and puts the
     :class:`~seamless_auth.User` on ``request.seamless_user``. A session from the
     cookie also gets the auth routes' cross-site check (403 on a state change from
-    another site). Works on sync and async views."""
+    another site). A recovery session (a user who still has to enroll a new passkey
+    or authenticator app) answers 403 ``enrollment_required`` unless
+    ``@require_auth(allow_recovery=True)``. Works on sync and async views."""
+    if view is None:
+        return lambda inner: _guard(inner, allow_recovery)
+    return _guard(view, allow_recovery)
 
+
+def _guard(view: F, allow_recovery: bool) -> F:
     def check(request: HttpRequest) -> HttpResponse | None:
         try:
-            user = get_adapter().authenticate_request(request.method or "GET", _headers(request))
+            user = get_adapter().authenticate_request(
+                request.method or "GET", _headers(request), allow_recovery=allow_recovery
+            )
+        except EnrollmentRequired:
+            return JsonResponse({"error": "enrollment_required"}, status=403)
         except CrossSiteRequest:
             return JsonResponse({"error": "cross_site_request_blocked"}, status=403)
         except Unauthenticated:

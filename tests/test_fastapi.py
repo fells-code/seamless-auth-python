@@ -18,6 +18,12 @@ def app_for(adapter: Adapter) -> TestClient:
     def me(user: User = Depends(current_user)) -> dict[str, str]:  # noqa: B008
         return {"id": user.id}
 
+    @app.get("/api/enroll")
+    def enroll(
+        user: User = Depends(RequireUser(adapter, allow_recovery=True)),  # noqa: B008
+    ) -> dict[str, object]:
+        return {"id": user.id, "recovery": user.recovery}
+
     @app.post("/api/transfer")
     def transfer(user: User = Depends(current_user)) -> dict[str, str]:  # noqa: B008
         return {"id": user.id}
@@ -119,6 +125,18 @@ def test_the_guard(api: FakeApi) -> None:
         "/api/transfer", headers={"cookie": session_cookie, "sec-fetch-site": "same-origin"}
     )
     assert r.status_code == 200
+
+
+def test_the_guard_refuses_a_recovery_session_unless_allowed(api: FakeApi) -> None:
+    client = app_for(api.adapter())
+    recovery = {"authorization": f"Bearer {api_token('u1', 'access', recovery=True)}"}
+
+    r = client.get("/api/me", headers=recovery)
+    assert r.status_code == 403
+    assert r.json() == {"detail": "enrollment_required"}
+    r = client.get("/api/enroll", headers=recovery)
+    assert (r.status_code, r.json()) == (200, {"id": "u1", "recovery": True})
+    assert client.get("/api/enroll").status_code == 401
 
 
 def test_an_async_deliver_runs_on_the_app_loop(api: FakeApi) -> None:

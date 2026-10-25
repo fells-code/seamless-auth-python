@@ -134,6 +134,18 @@ def test_the_guard(client: Client) -> None:
     assert r.status_code == 200
 
 
+def test_the_guard_refuses_a_recovery_session_unless_allowed(client: Client) -> None:
+    recovery = f"Bearer {api_token('u1', 'access', recovery=True)}"
+
+    for view in ("/api/me", "/api/me-async"):
+        r = client.get(view, HTTP_AUTHORIZATION=recovery)
+        assert (r.status_code, r.json()) == (403, {"error": "enrollment_required"}), view
+    r = client.get("/api/enroll", HTTP_AUTHORIZATION=recovery)
+    assert (r.status_code, r.json()) == (200, {"id": "u1", "recovery": True})
+    assert client.get("/api/enroll-async", HTTP_AUTHORIZATION=recovery).status_code == 200
+    assert client.get("/api/enroll").status_code == 401
+
+
 def test_the_guard_on_an_async_view(client: Client) -> None:
     r = client.get("/api/me-async", HTTP_AUTHORIZATION=f"Bearer {api_token('u1', 'access')}")
     assert r.status_code == 200 and r.json() == {"id": "u1"}

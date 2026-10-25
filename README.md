@@ -58,7 +58,9 @@ def me(user: User = Depends(current_user)):
 The auth server reads the service token from `API_SERVICE_TOKEN` and your app reads it from
 `SEAMLESS_SERVICE_TOKEN`; both hold the same value.
 
-`RequireUser` answers 401 unless the request carries a session, and returns the `User`.
+`RequireUser` answers 401 unless the request carries a session, and returns the `User`. It
+answers 403 for a recovery session (see [Recovery sessions](#recovery-sessions)) unless you pass
+`RequireUser(auth, allow_recovery=True)`.
 
 ## Django
 
@@ -87,6 +89,9 @@ def me(request):
     return JsonResponse({"id": user_of(request).id})
 ```
 
+`@require_auth(allow_recovery=True)` admits a recovery session too (see
+[Recovery sessions](#recovery-sessions)).
+
 `SEAMLESS_AUTH` takes the keyword arguments of `Adapter` (below). `deliver` and
 `resolve_client_ip` may be dotted paths to callables. `require_auth` works on sync and async
 views. The auth routes are exempt from Django's CSRF middleware: the adapter does its own
@@ -105,6 +110,23 @@ while cookies are `SameSite=None`, a state-changing request from another site (`
 cross-site`, or an `Origin` outside `allowed_origins`) answers 403. A bearer token is never
 attached by a browser, so it is not checked.
 
+### Recovery sessions
+
+A user who signs in with a recovery code, or completes self-service account recovery, gets a
+recovery session: its access token carries `recovery: true`, and the auth API refuses it on
+everything but enrolling a new passkey or authenticator app until they do. The guard refuses it
+too, with 403 `{ "error": "enrollment_required" }` (FastAPI's `RequireUser` answers `{ "detail":
+"enrollment_required" }`, as it does its other errors), so an application never treats a
+half-recovered account as signed in. Allow it on the routes that guide the user through
+enrollment with `allow_recovery=True`, and read `User.recovery` there.
+`Adapter.authenticate` raises `EnrollmentRequired`, a subclass of `Unauthenticated`.
+
+When a recovery session in cookie transport completes `POST /webauthn/register/finish` or
+`POST /totp/enroll/verify`, the adapter refreshes the session in the same response, so the
+access cookie drops the claim at once. If that refresh fails, the enrollment still answers as the
+auth API did and the cookie keeps the claim until the next refresh. A bearer client holds its own
+refresh token, so it calls `POST /auth/refresh` itself after enrolling.
+
 ### Request bodies
 
 The auth routes forward a request body to the auth API as JSON, so a body must be sent as
@@ -119,19 +141,24 @@ JSON it would be a sign-in the user never made. The client SDKs already send JSO
 | `auth_server_url` | required | Where the adapter reaches the auth API |
 | `auth_server_issuer` | the URL | Expected `iss` of the API's tokens, when it differs from the URL you reach it at |
 | `audience` | the issuer | Expected `aud` of the API's tokens |
-| `cookie_secret` | required | Signs the session cookies (32 bytes or more) |
-| `service_secret` | required | The service token, read from `SEAMLESS_SERVICE_TOKEN` in the examples; the same value as the API's `API_SERVICE_TOKEN` (32 bytes or more) |
+| `cookie_secret` | required | Signs the session cookies (32 bytes or more, and not a placeholder) |
+| `service_secret` | required | The service token, read from `SEAMLESS_SERVICE_TOKEN` in the examples; the same value as the API's `API_SERVICE_TOKEN` (32 bytes or more, and not a placeholder) |
 | `jwks_kid` | `dev-main` | `kid` header on service tokens |
 | `cookie_domain` | none | Cookie `Domain` |
-| `insecure_cookies` | `False` | Drops `Secure`, for local development over HTTP |
+| `insecure_cookies` | `False` | Drops `Secure`, and allows placeholder secrets, for local development over HTTP |
 | `same_site` | `None`, or `Lax` with `insecure_cookies` | Cookie `SameSite` |
 | `allowed_origins` | none | The only cross-origin callers allowed to change state while cookies are `SameSite=None` |
 | `access_cookie_name`, `refresh_cookie_name` | `seamless-access`, `seamless-refresh` | Session cookie names |
 | `registration_cookie_name`, `pre_auth_cookie_name` | `seamless-ephemeral` | Sign-in flow cookie names |
 | `deliver` | none | Sends OTP codes and magic links through your own transports |
+| `deliver_account_notices` | `False` | `deliver` also sends account notices to the owner (below) |
 | `resolve_client_ip` | the connecting peer | The end user's address. See below |
 | `disable_manifest_fetch` | `False` | Use only the manifest bundled with this version |
 | `http_client` | 15 second timeout, no redirects | Outbound `httpx2.Client` |
+
+The adapter refuses to start with a known placeholder for either secret, such as the starters'
+`dev-only-cookie-signing-key-replace-me`, `GRAB_FROM_SEAMLESS_AUTH_PORTAL_DEV`, or anything
+containing `replace-me`, unless `insecure_cookies` is set.
 
 ### Client IP
 
@@ -165,7 +192,33 @@ auth = Adapter(..., deliver=deliver)
 ```
 
 An `async def` callback works too; under FastAPI it runs on the application's event loop. A
-delivery error answers the request with 502 `delivery_failed`.
+delivery error answers the request with 502 `delivery_failed`. A delivery kind this version does
+not know is logged and skipped.
+
+An OTP code from `POST /recovery/start` carries `purpose="account_recovery"`
+(`Delivery.is_account_recovery`): word that message as an account recovery code, with a warning
+to ignore it if the user did not ask, not as a sign-in code.
+
+#### Account notices
+
+When account recovery opens (`POST /recovery/verify`), the auth API tells the account's owner at
+every verified address, with a link that cancels it. It sends those notices itself unless you
+take them on as well:
+
+```python
+auth = Adapter(..., deliver=deliver, deliver_account_notices=True)
+```
+
+Then `deliver` also receives `account_notice_email` (`to`, `subject`, `text`, `notice`,
+`cancel_url`) and `account_notice_sms` (`to`, `text`, `notice`, `cancel_url`), one call per
+address. The auth API counts a notice it hands back as the owner being told, so turn this on only
+when `deliver` sends both kinds. `cancel_url` (and `text`, which contains it) is a credential that
+cancels the recovery: send it only to `to`, and never log it. Every notice is attempted. One that
+gets through is enough, and the request answers as the auth API did. If none does, the owner has
+not been told, so the adapter cancels the recovery request (`POST /recovery/cancel` with the token
+from the cancel link) and answers 503 `recovery_notice_failed`, as the auth API itself would.
+Without the option, routes that carry notices are called without external delivery, so the auth
+API sends them through its own transports.
 
 ### Magic links
 
@@ -201,7 +254,8 @@ urlpatterns += [path("console/", include(console_urlpatterns))]
 It serves `GET` and `HEAD` only and forwards nothing but the method and path, so the browser's
 cookies never reach the upstream. It refuses any path that could leave the console (dot segments,
 encoded separators), and follows a redirect only while it stays inside the console on the auth API.
-When you serve it, add your API's origin to the auth server's `ORIGINS` so passkey ceremonies
+It keeps the auth API's `X-Frame-Options`, `Content-Security-Policy` and `X-Content-Type-Options`,
+so the console cannot be framed on your origin. When you serve it, add your API's origin to the auth server's `ORIGINS` so passkey ceremonies
 started in the console verify.
 
 ## How it runs

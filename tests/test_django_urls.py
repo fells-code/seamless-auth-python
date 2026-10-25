@@ -17,6 +17,16 @@ async def me_async(request: HttpRequest) -> JsonResponse:
     return JsonResponse({"id": user_of(request).id})
 
 
+@require_auth(allow_recovery=True)
+def enroll(request: HttpRequest) -> JsonResponse:
+    return JsonResponse({"id": user_of(request).id, "recovery": user_of(request).recovery})
+
+
+@require_auth(allow_recovery=True)
+async def enroll_async(request: HttpRequest) -> JsonResponse:
+    return JsonResponse({"id": user_of(request).id})
+
+
 @csrf_exempt
 @require_auth
 def transfer(request: HttpRequest) -> JsonResponse:
@@ -26,6 +36,8 @@ def transfer(request: HttpRequest) -> JsonResponse:
 urlpatterns = [
     path("api/me", me),
     path("api/me-async", me_async),
+    path("api/enroll", enroll),
+    path("api/enroll-async", enroll_async),
     path("api/transfer", transfer),
     path("auth/", include("seamless_auth.django")),
     path("console/", include(console_urlpatterns)),

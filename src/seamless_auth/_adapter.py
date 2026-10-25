@@ -29,7 +29,7 @@ from ._cookies import (
     session_cookies,
     set_cookie,
 )
-from ._delivery import Delivery, parse_delivery
+from ._delivery import MESSAGE_KINDS, NOTICE_KINDS, Delivery, parse_delivery
 from ._http import AuthRequest, AuthResponse, Headers
 from ._jwks import BodyTooLarge, JwksCache, TokenError, read_limited
 from ._jwt import Claims, sign_hs256, str_claim, unverified_claims
@@ -46,6 +46,14 @@ UPSTREAM_TIMEOUT = 15.0
 MAX_BODY_BYTES = 1 << 20
 TRANSPORT_HEADER = "x-seamless-auth-transport"
 DELIVERY_MODE_HEADER = "x-seamless-auth-delivery-mode"
+DELIVERY_KINDS_HEADER = "x-seamless-auth-delivery-kinds"
+
+# Example values from the starters and docs. Each is long enough to pass the length
+# check, and each is public.
+PLACEHOLDER_SECRETS = frozenset(
+    {"dev-only-cookie-signing-key-replace-me", "GRAB_FROM_SEAMLESS_AUTH_PORTAL_DEV"}
+)
+PLACEHOLDER_MARKER = "replace-me"
 
 # The auth API validates service tokens against a fixed issuer and audience,
 # whatever the adopter's own audience is.
@@ -63,6 +71,12 @@ PROXY_REUSE = 45.0
 # API asks for confirmation instead, so its absence is never a 401 here.
 _MAGIC_LINK_VERIFY = ("GET", "/magic-link/verify/{token}")
 
+# Enrolling a factor from a recovery session lifts the API's restriction on the
+# session, but the access token keeps its recovery claim until it is refreshed.
+_ENROLLMENT_ROUTES = frozenset(
+    {("POST", "/webauthn/register/finish"), ("POST", "/totp/enroll/verify")}
+)
+
 _COOKIE_NAME = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
 _COOKIE_DOMAIN = re.compile(r"^[A-Za-z0-9.\-]+$")
 _TOKEN = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
@@ -79,12 +93,20 @@ class User:
     roles: tuple[str, ...] = ()
     email: str | None = None
     phone: str | None = None
+    #: A recovery session: signed in with a recovery code or self-service recovery,
+    #: and not yet enrolled in a new passkey or authenticator app.
+    recovery: bool = False
     #: The auth API access token, for calling the API on the user's behalf.
     token: str = field(default="", repr=False)
 
 
 class Unauthenticated(Exception):
     """A request carried no valid session."""
+
+
+class EnrollmentRequired(Unauthenticated):
+    """A recovery session, refused by a guard that does not allow one. Answer it
+    403 ``enrollment_required``: the user is signed in only to enroll a factor."""
 
 
 class CrossSiteRequest(Exception):
@@ -162,6 +184,7 @@ class Adapter:
         registration_cookie_name: str = "seamless-ephemeral",
         pre_auth_cookie_name: str = "seamless-ephemeral",
         deliver: Deliver | None = None,
+        deliver_account_notices: bool = False,
         resolve_client_ip: ClientIpResolver | TrustedProxies | None = None,
         disable_manifest_fetch: bool = False,
         http_client: httpx2.Client | None = None,
@@ -178,6 +201,18 @@ class Adapter:
             raise ValueError(
                 f"seamless-auth: service_secret must be at least {MIN_SECRET_LENGTH} bytes"
             )
+        if not insecure_cookies:
+            for option, secret in (
+                ("cookie_secret", cookie_secret),
+                ("service_secret", service_secret),
+            ):
+                if _is_placeholder(secret):
+                    raise ValueError(
+                        f"seamless-auth: {option} is a placeholder value. Generate a real "
+                        "secret (it is allowed only with insecure_cookies, for local development)"
+                    )
+        if deliver_account_notices and deliver is None:
+            raise ValueError("seamless-auth: deliver_account_notices needs a deliver callback")
         for name in (
             access_cookie_name,
             refresh_cookie_name,
@@ -228,6 +263,7 @@ class Adapter:
         self._timeout: dict[str, Any] = {"timeout": UPSTREAM_TIMEOUT} if unbounded else {}
         _redact_upstream_urls(url)
         self._deliver = _sync_deliver(deliver) if deliver is not None else None
+        self._delivered_kinds = MESSAGE_KINDS | (NOTICE_KINDS if deliver_account_notices else set())
         self._resolve_client_ip = resolve_client_ip
         self._jwks = JwksCache(url, self._client)
         self._manifest = ManifestSource(url, self._client, not disable_manifest_fetch)
@@ -342,6 +378,7 @@ class Adapter:
         authorization: str | None = None,
         service: str | None = None,
         external_delivery: bool = False,
+        delivery_kinds: Iterable[str] = (),
         stream: bool = False,
     ) -> httpx2.Response:
         url = f"{self._config.auth_server_url}{path}"
@@ -362,6 +399,9 @@ class Adapter:
             headers["x-seamless-client-user-agent"] = forwarded.user_agent
         if external_delivery:
             headers[DELIVERY_MODE_HEADER] = "external"
+        kinds = ",".join(delivery_kinds)
+        if kinds:
+            headers[DELIVERY_KINDS_HEADER] = kinds
         try:
             request = self._client.build_request(
                 method, url, headers=headers, content=content, **self._timeout
@@ -483,7 +523,11 @@ class Adapter:
                 return credential
             authorization, cookies = credential
 
-        external = route.delivery and self._deliver is not None
+        # The API counts a notice it hands back as the owner being told, so it is
+        # asked for one only when the application has said it delivers both kinds.
+        # Otherwise the API sends the notice itself.
+        notices = route.notices and NOTICE_KINDS.issubset(self._delivered_kinds)
+        external = (route.delivery or notices) and self._deliver is not None
         try:
             res = self._call(
                 forwarded,
@@ -498,6 +542,7 @@ class Adapter:
                     else self._proxy_authorization()
                 ),
                 external_delivery=external,
+                delivery_kinds=sorted(NOTICE_KINDS) if notices else (),
                 stream=True,
             )
         except _UpstreamError as err:
@@ -514,21 +559,25 @@ class Adapter:
             failed.set = cookies
             return failed
 
-        if route.delivery and isinstance(data, dict):
-            # The message is the application's to send. It never goes back to the
+        if (route.delivery or route.notices) and isinstance(data, dict):
+            # Messages are the application's to send. They never go back to the
             # caller, in either transport.
             raw_delivery = data.pop("delivery", None)
-            if raw_delivery is not None and external and self._deliver is not None:
-                try:
-                    self._deliver(parse_delivery(raw_delivery))
-                except Exception as err:
-                    log.warning(
-                        "[seamless-auth] Delivery for %s %s failed: %s",
-                        route.method,
-                        route.path,
-                        err,
-                    )
-                    return _Reply(502, {"error": "delivery_failed"}, set=cookies)
+            raw_deliveries = data.pop("deliveries", None)
+            if (
+                route.delivery
+                and raw_delivery is not None
+                and external
+                and self._send_deliveries(route, [raw_delivery])[1]
+            ):
+                return _Reply(502, {"error": "delivery_failed"}, set=cookies)
+            if notices and isinstance(raw_deliveries, list) and raw_deliveries:
+                delivered, _ = self._send_deliveries(route, raw_deliveries)
+                if not delivered:
+                    # The API opened the request on the strength of these notices.
+                    # Unseen by the owner, it must not be left to complete.
+                    self._cancel_recovery(forwarded, raw_deliveries)
+                    return _Reply(503, {"error": "recovery_notice_failed"}, set=cookies)
 
         reply = _Reply(res.status_code, set=cookies)
         reply.clear = [self._config.cookie_name(held) for held in route.clears]
@@ -547,8 +596,124 @@ class Adapter:
                 )
                 return _error(502, "invalid_upstream_session")
 
+        if (
+            not bearer
+            and (route.method, route.path) in _ENROLLMENT_ROUTES
+            and _is_recovery_token(_strip_bearer(authorization))
+        ):
+            reply.set = self._refresh_after_enrollment(request.headers, forwarded, reply.set)
+
         reply.body = data if bearer or data is None else _cookie_transport_body(route.pick, data)
         return reply
+
+    def _send_deliveries(self, route: ManifestRoute, pending: list[Any]) -> tuple[int, bool]:
+        """Hands each message to the application, and reports how many were sent and
+        whether any failed. Every one is attempted, so one failed transport does not
+        keep a notice from the account's other address. A kind this adapter does not
+        deliver is logged and skipped."""
+        deliver = self._deliver
+        if deliver is None:
+            return 0, False
+        sent = 0
+        failed = False
+        for raw in pending:
+            try:
+                delivery = parse_delivery(raw)
+            except ValueError as err:
+                log.warning(
+                    "[seamless-auth] Unusable delivery from %s %s: %s",
+                    route.method,
+                    route.path,
+                    err,
+                )
+                failed = True
+                continue
+            if delivery.kind not in self._delivered_kinds:
+                log.warning(
+                    "[seamless-auth] Skipping delivery kind %r from %s %s",
+                    delivery.kind[:64],
+                    route.method,
+                    route.path,
+                )
+                continue
+            try:
+                deliver(delivery)
+            except Exception as err:
+                # The type only: a message to the owner holds a cancel link, which an
+                # error from the transport may echo.
+                log.warning(
+                    "[seamless-auth] Delivery of %s for %s %s failed: %s",
+                    delivery.kind,
+                    route.method,
+                    route.path,
+                    type(err).__name__,
+                )
+                failed = True
+                continue
+            sent += 1
+        return sent, failed
+
+    def _cancel_recovery(self, forwarded: _Forwarded, notices: list[Any]) -> None:
+        """Cancels the recovery request the notices report, with the token in the
+        fragment of their cancel link."""
+        token = next(filter(None, (_cancel_token(raw) for raw in notices)), None)
+        if token is None:
+            log.warning("[seamless-auth] Could not cancel an unannounced recovery: no cancel token")
+            return
+        try:
+            res = self._call(
+                forwarded,
+                "POST",
+                "/recovery/cancel",
+                body=json.dumps({"cancelToken": token}).encode(),
+                service=self._proxy_authorization(),
+                stream=True,
+            )
+        except _UpstreamError as err:
+            log.warning("[seamless-auth] Could not cancel an unannounced recovery: %s", err)
+            return
+        res.close()
+        if not 200 <= res.status_code < 300:
+            log.warning(
+                "[seamless-auth] Could not cancel an unannounced recovery: HTTP %s",
+                res.status_code,
+            )
+
+    def _refresh_after_enrollment(
+        self, headers: Headers, forwarded: _Forwarded, issued: list[CookieWrite]
+    ) -> list[CookieWrite]:
+        """Rotates the session once a recovery session enrolled a factor, so the
+        access cookie loses the recovery claim now rather than at its next expiry.
+        Uses the refresh token this request already rotated to, if it did. A failure
+        leaves the cookies as they were: the enrollment itself succeeded."""
+        refresh = next((c for c in issued if c.name == self._config.refresh_cookie_name), None)
+        if refresh is not None:
+            sub = str_claim(refresh.value, "sub")
+            refresh_token = str_claim(refresh.value, "refreshToken")
+            key = f"rotated:{refresh_token}"
+        else:
+            raw = raw_cookie(headers, self._config.refresh_cookie_name)
+            payload = read_cookie(
+                self._config, headers, self._config.refresh_cookie_name, KIND_REFRESH
+            )
+            sub = str_claim(payload, "sub")
+            refresh_token = str_claim(payload, "refreshToken")
+            key = f"cookie:{raw}"
+        if not refresh_token:
+            return issued
+        service = self._sign_service(sub, {"refreshToken": refresh_token})
+        outcome = self._refreshes.share(
+            key, lambda: self._rotate(forwarded, refresh_token, service)
+        )
+        if outcome.session is None:
+            log.debug("[seamless-auth] Refresh after enrollment failed")
+            return issued
+        try:
+            session_id = self._verify_session(outcome.session, "access")
+            return session_cookies(self._config, outcome.session, session_id, True)
+        except (TokenError, ValueError) as err:
+            log.debug("[seamless-auth] Refresh after enrollment refused: %s", err)
+            return issued
 
     def _issued_cookies(
         self, route: ManifestRoute, session: Claims, session_id: str
@@ -666,34 +831,48 @@ class Adapter:
 
     # The guard.
 
-    def authenticate(self, headers: Headers | Iterable[tuple[str, str]]) -> User:
+    def authenticate(
+        self, headers: Headers | Iterable[tuple[str, str]], *, allow_recovery: bool = False
+    ) -> User:
         """Verifies a request's session: the adapter's access cookie, or an auth API
         access token in ``Authorization: Bearer`` for clients with no cookie jar.
         The cookie wins when present. It does not refresh: silent refresh belongs
         to the auth routes, and a bearer client refreshes through
-        ``POST /auth/refresh`` itself. Raises :class:`Unauthenticated`."""
-        return self._authenticate(_as_headers(headers))[0]
+        ``POST /auth/refresh`` itself. Raises :class:`Unauthenticated`, or its
+        subclass :class:`EnrollmentRequired` for a recovery session unless
+        ``allow_recovery`` is set."""
+        return self._authenticate(_as_headers(headers), allow_recovery)[0]
 
     def authenticate_request(
-        self, method: str, headers: Headers | Iterable[tuple[str, str]]
+        self,
+        method: str,
+        headers: Headers | Iterable[tuple[str, str]],
+        *,
+        allow_recovery: bool = False,
     ) -> User:
         """:meth:`authenticate` for a guarded route. A session from the cookie also
         gets the auth routes' cross-site check, or a form on another site could act
         as the user: raises :class:`CrossSiteRequest` for one."""
         headers = _as_headers(headers)
-        user, by_cookie = self._authenticate(headers)
+        user, by_cookie = self._authenticate(headers, allow_recovery)
         if by_cookie and self._check_origin(method, headers) is not None:
             raise CrossSiteRequest
         return user
 
-    def _authenticate(self, headers: Headers) -> tuple[User, bool]:
+    def _authenticate(self, headers: Headers, allow_recovery: bool) -> tuple[User, bool]:
+        user, by_cookie = self._session_of(headers)
+        if user.recovery and not allow_recovery:
+            raise EnrollmentRequired
+        return user, by_cookie
+
+    def _session_of(self, headers: Headers) -> tuple[User, bool]:
         name = self._config.access_cookie_name
         if raw_cookie(headers, name):
             claims = read_cookie(self._config, headers, name, KIND_ACCESS)
             token = str_claim(claims, "token")
             if claims is None or not str_claim(claims, "sub") or not _is_access_token(token):
                 raise Unauthenticated
-            return _user_from(claims, token), True
+            return _user_from(claims, token, _is_recovery_token(token)), True
 
         bearer = _bearer_token(headers)
         if bearer is None:
@@ -708,7 +887,7 @@ class Adapter:
         # keeps it from passing for a session.
         if str_claim(claims, "typ") != "access" or not str_claim(claims, "sub"):
             raise Unauthenticated
-        return _user_from(claims, bearer), False
+        return _user_from(claims, bearer, claims.get("recovery") is True), False
 
     def _check_origin(self, method: str, headers: Headers) -> _Reply | None:
         """Blocks cross-site state changes while cookies are SameSite=None, which is
@@ -839,13 +1018,36 @@ def _is_access_token(token: str) -> bool:
     return bool(token) and str_claim(unverified_claims(token), "typ") == "access"
 
 
-def _user_from(claims: Claims, token: str) -> User:
+def _is_recovery_token(token: str) -> bool:
+    """Whether an auth API token, verified before it was stored or forwarded, is a
+    recovery session's. Only a literal ``true`` counts."""
+    return bool(token) and (unverified_claims(token) or {}).get("recovery") is True
+
+
+def _cancel_token(raw: Any) -> str | None:
+    url = raw.get("cancelUrl") if isinstance(raw, dict) else None
+    if not isinstance(url, str):
+        return None
+    _, sep, fragment = url.partition("#")
+    return fragment if sep and fragment else None
+
+
+def _strip_bearer(authorization: str | None) -> str:
+    return authorization[7:] if authorization and authorization.startswith("Bearer ") else ""
+
+
+def _is_placeholder(secret: str) -> bool:
+    return secret in PLACEHOLDER_SECRETS or PLACEHOLDER_MARKER in secret.lower()
+
+
+def _user_from(claims: Claims, token: str, recovery: bool) -> User:
     roles = claims.get("roles")
     return User(
         id=str_claim(claims, "sub"),
         roles=tuple(r for r in roles if isinstance(r, str)) if isinstance(roles, list) else (),
         email=str_claim(claims, "email") or None,
         phone=str_claim(claims, "phone") or None,
+        recovery=recovery,
         token=token,
     )
 

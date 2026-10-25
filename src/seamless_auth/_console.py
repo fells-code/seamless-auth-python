@@ -20,7 +20,17 @@ log = logging.getLogger("seamless_auth")
 CONSOLE_BASE_PATH = "/console"
 UPSTREAM_TIMEOUT = 10.0
 MAX_REDIRECTS = 5
-FORWARDED_HEADERS = ("content-type", "cache-control", "etag", "last-modified")
+FORWARDED_HEADERS = (
+    "content-type",
+    "cache-control",
+    "etag",
+    "last-modified",
+    # The console runs on the application's origin, so without the API's framing and
+    # sniffing policy it could be framed there.
+    "x-frame-options",
+    "content-security-policy",
+    "x-content-type-options",
+)
 
 
 def _error(status: int, message: str) -> AuthResponse:

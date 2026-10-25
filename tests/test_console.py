@@ -40,6 +40,24 @@ def test_the_console_is_proxied_from_the_auth_api(api: FakeApi) -> None:
     assert "cookie" not in recorded.headers and "authorization" not in recorded.headers
 
 
+def test_the_console_keeps_the_apis_framing_and_sniffing_policy(api: FakeApi) -> None:
+    policy = {
+        "content-type": "text/html",
+        "x-frame-options": "DENY",
+        "content-security-policy": "frame-ancestors 'none'",
+        "x-content-type-options": "nosniff",
+    }
+    api.on("GET", "/console", lambda _r: httpx2.Response(200, text="<html>", headers=policy))
+    api.on("HEAD", "/console", lambda _r: httpx2.Response(200, headers=policy))
+    adapter = api.adapter()
+
+    for method in ("GET", "HEAD"):
+        r = read(adapter.console(method, "/"))
+        assert r.status == 200
+        for name, value in policy.items():
+            assert r.headers[name] == value, (method, name)
+
+
 def test_the_console_root_and_head(api: FakeApi) -> None:
     api.on("GET", "/console", html("<html>"))  # type: ignore[arg-type]
     api.on("HEAD", "/console", html(""))  # type: ignore[arg-type]
