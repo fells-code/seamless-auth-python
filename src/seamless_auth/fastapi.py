@@ -26,7 +26,14 @@ from starlette.background import BackgroundTask
 from starlette.concurrency import run_in_threadpool
 from starlette.responses import Response, StreamingResponse
 
-from ._adapter import MAX_BODY_BYTES, Adapter, CrossSiteRequest, Unauthenticated, User
+from ._adapter import (
+    MAX_BODY_BYTES,
+    Adapter,
+    CrossSiteRequest,
+    EnrollmentRequired,
+    Unauthenticated,
+    User,
+)
 from ._http import AuthRequest, AuthResponse, Headers
 
 __all__ = ["RequireUser", "auth_router", "console_router"]
@@ -70,16 +77,25 @@ class RequireUser:
     returns its :class:`~seamless_auth.User`. A session from the cookie also gets the
     auth routes' cross-site check (403 on a state change from another site).
 
+    A recovery session (a user who still has to enroll a new passkey or
+    authenticator app) answers 403 ``enrollment_required`` unless
+    ``allow_recovery`` is set.
+
     A plain function, so FastAPI runs it on its threadpool: the first sight of a key
     may fetch the auth API's key set.
     """
 
-    def __init__(self, adapter: Adapter) -> None:
+    def __init__(self, adapter: Adapter, *, allow_recovery: bool = False) -> None:
         self._adapter = adapter
+        self._allow_recovery = allow_recovery
 
     def __call__(self, request: Request) -> User:
         try:
-            return self._adapter.authenticate_request(request.method, _headers(request))
+            return self._adapter.authenticate_request(
+                request.method, _headers(request), allow_recovery=self._allow_recovery
+            )
+        except EnrollmentRequired:
+            raise HTTPException(status_code=403, detail="enrollment_required") from None
         except CrossSiteRequest:
             raise HTTPException(status_code=403, detail="cross_site_request_blocked") from None
         except Unauthenticated:

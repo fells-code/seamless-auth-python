@@ -58,7 +58,9 @@ def me(user: User = Depends(current_user)):
 The auth server reads the service token from `API_SERVICE_TOKEN` and your app reads it from
 `SEAMLESS_SERVICE_TOKEN`; both hold the same value.
 
-`RequireUser` answers 401 unless the request carries a session, and returns the `User`.
+`RequireUser` answers 401 unless the request carries a session, and returns the `User`. It
+answers 403 for a recovery session (see [Recovery sessions](#recovery-sessions)) unless you pass
+`RequireUser(auth, allow_recovery=True)`.
 
 ## Django
 
@@ -87,6 +89,9 @@ def me(request):
     return JsonResponse({"id": user_of(request).id})
 ```
 
+`@require_auth(allow_recovery=True)` admits a recovery session too (see
+[Recovery sessions](#recovery-sessions)).
+
 `SEAMLESS_AUTH` takes the keyword arguments of `Adapter` (below). `deliver` and
 `resolve_client_ip` may be dotted paths to callables. `require_auth` works on sync and async
 views. The auth routes are exempt from Django's CSRF middleware: the adapter does its own
@@ -104,6 +109,23 @@ A request the guard admits on the session cookie also gets the auth routes' cros
 while cookies are `SameSite=None`, a state-changing request from another site (`Sec-Fetch-Site:
 cross-site`, or an `Origin` outside `allowed_origins`) answers 403. A bearer token is never
 attached by a browser, so it is not checked.
+
+### Recovery sessions
+
+A user who signs in with a recovery code, or completes self-service account recovery, gets a
+recovery session: its access token carries `recovery: true`, and the auth API refuses it on
+everything but enrolling a new passkey or authenticator app until they do. The guard refuses it
+too, with 403 `{ "error": "enrollment_required" }` (FastAPI's `RequireUser` answers `{ "detail":
+"enrollment_required" }`, as it does its other errors), so an application never treats a
+half-recovered account as signed in. Allow it on the routes that guide the user through
+enrollment with `allow_recovery=True`, and read `User.recovery` there.
+`Adapter.authenticate` raises `EnrollmentRequired`, a subclass of `Unauthenticated`.
+
+When a recovery session in cookie transport completes `POST /webauthn/register/finish` or
+`POST /totp/enroll/verify`, the adapter refreshes the session in the same response, so the
+access cookie drops the claim at once. If that refresh fails, the enrollment still answers as the
+auth API did and the cookie keeps the claim until the next refresh. A bearer client holds its own
+refresh token, so it calls `POST /auth/refresh` itself after enrolling.
 
 ### Request bodies
 

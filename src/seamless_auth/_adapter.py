@@ -70,6 +70,12 @@ PROXY_REUSE = 45.0
 # API asks for confirmation instead, so its absence is never a 401 here.
 _MAGIC_LINK_VERIFY = ("GET", "/magic-link/verify/{token}")
 
+# Enrolling a factor from a recovery session lifts the API's restriction on the
+# session, but the access token keeps its recovery claim until it is refreshed.
+_ENROLLMENT_ROUTES = frozenset(
+    {("POST", "/webauthn/register/finish"), ("POST", "/totp/enroll/verify")}
+)
+
 _COOKIE_NAME = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
 _COOKIE_DOMAIN = re.compile(r"^[A-Za-z0-9.\-]+$")
 _TOKEN = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
@@ -86,12 +92,20 @@ class User:
     roles: tuple[str, ...] = ()
     email: str | None = None
     phone: str | None = None
+    #: A recovery session: signed in with a recovery code or self-service recovery,
+    #: and not yet enrolled in a new passkey or authenticator app.
+    recovery: bool = False
     #: The auth API access token, for calling the API on the user's behalf.
     token: str = field(default="", repr=False)
 
 
 class Unauthenticated(Exception):
     """A request carried no valid session."""
+
+
+class EnrollmentRequired(Unauthenticated):
+    """A recovery session, refused by a guard that does not allow one. Answer it
+    403 ``enrollment_required``: the user is signed in only to enroll a factor."""
 
 
 class CrossSiteRequest(Exception):
@@ -564,8 +578,51 @@ class Adapter:
                 )
                 return _error(502, "invalid_upstream_session")
 
+        if (
+            not bearer
+            and (route.method, route.path) in _ENROLLMENT_ROUTES
+            and _is_recovery_token(_strip_bearer(authorization))
+        ):
+            reply.set = self._refresh_after_enrollment(request.headers, forwarded, reply.set)
+
         reply.body = data if bearer or data is None else _cookie_transport_body(route.pick, data)
         return reply
+
+    def _refresh_after_enrollment(
+        self, headers: Headers, forwarded: _Forwarded, issued: list[CookieWrite]
+    ) -> list[CookieWrite]:
+        """Rotates the session once a recovery session enrolled a factor, so the
+        access cookie loses the recovery claim now rather than at its next expiry.
+        Uses the refresh token this request already rotated to, if it did. A failure
+        leaves the cookies as they were: the enrollment itself succeeded."""
+        refresh = next((c for c in issued if c.name == self._config.refresh_cookie_name), None)
+        if refresh is not None:
+            sub = str_claim(refresh.value, "sub")
+            refresh_token = str_claim(refresh.value, "refreshToken")
+            key = f"rotated:{refresh_token}"
+        else:
+            raw = raw_cookie(headers, self._config.refresh_cookie_name)
+            payload = read_cookie(
+                self._config, headers, self._config.refresh_cookie_name, KIND_REFRESH
+            )
+            sub = str_claim(payload, "sub")
+            refresh_token = str_claim(payload, "refreshToken")
+            key = f"cookie:{raw}"
+        if not refresh_token:
+            return issued
+        service = self._sign_service(sub, {"refreshToken": refresh_token})
+        outcome = self._refreshes.share(
+            key, lambda: self._rotate(forwarded, refresh_token, service)
+        )
+        if outcome.session is None:
+            log.debug("[seamless-auth] Refresh after enrollment failed")
+            return issued
+        try:
+            session_id = self._verify_session(outcome.session, "access")
+            return session_cookies(self._config, outcome.session, session_id, True)
+        except (TokenError, ValueError) as err:
+            log.debug("[seamless-auth] Refresh after enrollment refused: %s", err)
+            return issued
 
     def _issued_cookies(
         self, route: ManifestRoute, session: Claims, session_id: str
@@ -683,34 +740,48 @@ class Adapter:
 
     # The guard.
 
-    def authenticate(self, headers: Headers | Iterable[tuple[str, str]]) -> User:
+    def authenticate(
+        self, headers: Headers | Iterable[tuple[str, str]], *, allow_recovery: bool = False
+    ) -> User:
         """Verifies a request's session: the adapter's access cookie, or an auth API
         access token in ``Authorization: Bearer`` for clients with no cookie jar.
         The cookie wins when present. It does not refresh: silent refresh belongs
         to the auth routes, and a bearer client refreshes through
-        ``POST /auth/refresh`` itself. Raises :class:`Unauthenticated`."""
-        return self._authenticate(_as_headers(headers))[0]
+        ``POST /auth/refresh`` itself. Raises :class:`Unauthenticated`, or its
+        subclass :class:`EnrollmentRequired` for a recovery session unless
+        ``allow_recovery`` is set."""
+        return self._authenticate(_as_headers(headers), allow_recovery)[0]
 
     def authenticate_request(
-        self, method: str, headers: Headers | Iterable[tuple[str, str]]
+        self,
+        method: str,
+        headers: Headers | Iterable[tuple[str, str]],
+        *,
+        allow_recovery: bool = False,
     ) -> User:
         """:meth:`authenticate` for a guarded route. A session from the cookie also
         gets the auth routes' cross-site check, or a form on another site could act
         as the user: raises :class:`CrossSiteRequest` for one."""
         headers = _as_headers(headers)
-        user, by_cookie = self._authenticate(headers)
+        user, by_cookie = self._authenticate(headers, allow_recovery)
         if by_cookie and self._check_origin(method, headers) is not None:
             raise CrossSiteRequest
         return user
 
-    def _authenticate(self, headers: Headers) -> tuple[User, bool]:
+    def _authenticate(self, headers: Headers, allow_recovery: bool) -> tuple[User, bool]:
+        user, by_cookie = self._session_of(headers)
+        if user.recovery and not allow_recovery:
+            raise EnrollmentRequired
+        return user, by_cookie
+
+    def _session_of(self, headers: Headers) -> tuple[User, bool]:
         name = self._config.access_cookie_name
         if raw_cookie(headers, name):
             claims = read_cookie(self._config, headers, name, KIND_ACCESS)
             token = str_claim(claims, "token")
             if claims is None or not str_claim(claims, "sub") or not _is_access_token(token):
                 raise Unauthenticated
-            return _user_from(claims, token), True
+            return _user_from(claims, token, _is_recovery_token(token)), True
 
         bearer = _bearer_token(headers)
         if bearer is None:
@@ -725,7 +796,7 @@ class Adapter:
         # keeps it from passing for a session.
         if str_claim(claims, "typ") != "access" or not str_claim(claims, "sub"):
             raise Unauthenticated
-        return _user_from(claims, bearer), False
+        return _user_from(claims, bearer, claims.get("recovery") is True), False
 
     def _check_origin(self, method: str, headers: Headers) -> _Reply | None:
         """Blocks cross-site state changes while cookies are SameSite=None, which is
@@ -856,17 +927,28 @@ def _is_access_token(token: str) -> bool:
     return bool(token) and str_claim(unverified_claims(token), "typ") == "access"
 
 
+def _is_recovery_token(token: str) -> bool:
+    """Whether an auth API token, verified before it was stored or forwarded, is a
+    recovery session's. Only a literal ``true`` counts."""
+    return bool(token) and (unverified_claims(token) or {}).get("recovery") is True
+
+
+def _strip_bearer(authorization: str | None) -> str:
+    return authorization[7:] if authorization and authorization.startswith("Bearer ") else ""
+
+
 def _is_placeholder(secret: str) -> bool:
     return secret in PLACEHOLDER_SECRETS or PLACEHOLDER_MARKER in secret.lower()
 
 
-def _user_from(claims: Claims, token: str) -> User:
+def _user_from(claims: Claims, token: str, recovery: bool) -> User:
     roles = claims.get("roles")
     return User(
         id=str_claim(claims, "sub"),
         roles=tuple(r for r in roles if isinstance(r, str)) if isinstance(roles, list) else (),
         email=str_claim(claims, "email") or None,
         phone=str_claim(claims, "phone") or None,
+        recovery=recovery,
         token=token,
     )
 
