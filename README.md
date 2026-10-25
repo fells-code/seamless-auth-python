@@ -201,7 +201,8 @@ urlpatterns += [path("console/", include(console_urlpatterns))]
 It serves `GET` and `HEAD` only and forwards nothing but the method and path, so the browser's
 cookies never reach the upstream. It refuses any path that could leave the console (dot segments,
 encoded separators), and follows a redirect only while it stays inside the console on the auth API.
-When you serve it, add your API's origin to the auth server's `ORIGINS` so passkey ceremonies
+It keeps the auth API's `X-Frame-Options`, `Content-Security-Policy` and `X-Content-Type-Options`,
+so the console cannot be framed on your origin. When you serve it, add your API's origin to the auth server's `ORIGINS` so passkey ceremonies
 started in the console verify.
 
 ## How it runs
