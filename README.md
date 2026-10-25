@@ -151,6 +151,7 @@ JSON it would be a sign-in the user never made. The client SDKs already send JSO
 | `access_cookie_name`, `refresh_cookie_name` | `seamless-access`, `seamless-refresh` | Session cookie names |
 | `registration_cookie_name`, `pre_auth_cookie_name` | `seamless-ephemeral` | Sign-in flow cookie names |
 | `deliver` | none | Sends OTP codes and magic links through your own transports |
+| `deliver_account_notices` | `False` | `deliver` also sends account notices to the owner (below) |
 | `resolve_client_ip` | the connecting peer | The end user's address. See below |
 | `disable_manifest_fetch` | `False` | Use only the manifest bundled with this version |
 | `http_client` | 15 second timeout, no redirects | Outbound `httpx2.Client` |
@@ -191,7 +192,31 @@ auth = Adapter(..., deliver=deliver)
 ```
 
 An `async def` callback works too; under FastAPI it runs on the application's event loop. A
-delivery error answers the request with 502 `delivery_failed`.
+delivery error answers the request with 502 `delivery_failed`. A delivery kind this version does
+not know is logged and skipped.
+
+An OTP code from `POST /recovery/start` carries `purpose="account_recovery"`
+(`Delivery.is_account_recovery`): word that message as an account recovery code, with a warning
+to ignore it if the user did not ask, not as a sign-in code.
+
+#### Account notices
+
+When account recovery opens (`POST /recovery/verify`), the auth API tells the account's owner at
+every verified address, with a link that cancels it. It sends those notices itself unless you
+take them on as well:
+
+```python
+auth = Adapter(..., deliver=deliver, deliver_account_notices=True)
+```
+
+Then `deliver` also receives `account_notice_email` (`to`, `subject`, `text`, `notice`,
+`cancel_url`) and `account_notice_sms` (`to`, `text`, `notice`, `cancel_url`), one call per
+address. The auth API counts a notice it hands back as the owner being told, so turn this on only
+when `deliver` sends both kinds. `cancel_url` (and `text`, which contains it) is a credential that
+cancels the recovery: send it only to `to`, and never log it. If any notice fails, every other one
+is still attempted and the request answers 502 `delivery_failed`. Without the option, routes that
+carry notices are called without external delivery, so the auth API sends them through its own
+transports.
 
 ### Magic links
 

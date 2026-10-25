@@ -48,6 +48,7 @@ class ManifestRoute:
     clears: tuple[str, ...] = ()
     pick: tuple[str, ...] | None = None
     delivery: bool = False
+    notices: bool = False
 
     def upstream_path(self, params: dict[str, str]) -> str:
         """The upstream path, with each ``{param}`` segment filled and escaped."""
@@ -161,6 +162,7 @@ def _parse_route(item: Any) -> ManifestRoute:
         clears=tuple(clears),
         pick=tuple(pick) if pick is not None else None,
         delivery=bool(item.get("delivery")),
+        notices=bool(item.get("notices")),
     )
 
 

@@ -29,7 +29,7 @@ from ._cookies import (
     session_cookies,
     set_cookie,
 )
-from ._delivery import Delivery, parse_delivery
+from ._delivery import MESSAGE_KINDS, NOTICE_KINDS, Delivery, parse_delivery
 from ._http import AuthRequest, AuthResponse, Headers
 from ._jwks import BodyTooLarge, JwksCache, TokenError, read_limited
 from ._jwt import Claims, sign_hs256, str_claim, unverified_claims
@@ -46,6 +46,7 @@ UPSTREAM_TIMEOUT = 15.0
 MAX_BODY_BYTES = 1 << 20
 TRANSPORT_HEADER = "x-seamless-auth-transport"
 DELIVERY_MODE_HEADER = "x-seamless-auth-delivery-mode"
+DELIVERY_KINDS_HEADER = "x-seamless-auth-delivery-kinds"
 
 # Example values from the starters and docs. Each is long enough to pass the length
 # check, and each is public.
@@ -183,6 +184,7 @@ class Adapter:
         registration_cookie_name: str = "seamless-ephemeral",
         pre_auth_cookie_name: str = "seamless-ephemeral",
         deliver: Deliver | None = None,
+        deliver_account_notices: bool = False,
         resolve_client_ip: ClientIpResolver | TrustedProxies | None = None,
         disable_manifest_fetch: bool = False,
         http_client: httpx2.Client | None = None,
@@ -209,6 +211,8 @@ class Adapter:
                         f"seamless-auth: {option} is a placeholder value. Generate a real "
                         "secret (it is allowed only with insecure_cookies, for local development)"
                     )
+        if deliver_account_notices and deliver is None:
+            raise ValueError("seamless-auth: deliver_account_notices needs a deliver callback")
         for name in (
             access_cookie_name,
             refresh_cookie_name,
@@ -259,6 +263,7 @@ class Adapter:
         self._timeout: dict[str, Any] = {"timeout": UPSTREAM_TIMEOUT} if unbounded else {}
         _redact_upstream_urls(url)
         self._deliver = _sync_deliver(deliver) if deliver is not None else None
+        self._delivered_kinds = MESSAGE_KINDS | (NOTICE_KINDS if deliver_account_notices else set())
         self._resolve_client_ip = resolve_client_ip
         self._jwks = JwksCache(url, self._client)
         self._manifest = ManifestSource(url, self._client, not disable_manifest_fetch)
@@ -373,6 +378,7 @@ class Adapter:
         authorization: str | None = None,
         service: str | None = None,
         external_delivery: bool = False,
+        delivery_kinds: Iterable[str] = (),
         stream: bool = False,
     ) -> httpx2.Response:
         url = f"{self._config.auth_server_url}{path}"
@@ -393,6 +399,9 @@ class Adapter:
             headers["x-seamless-client-user-agent"] = forwarded.user_agent
         if external_delivery:
             headers[DELIVERY_MODE_HEADER] = "external"
+        kinds = ",".join(delivery_kinds)
+        if kinds:
+            headers[DELIVERY_KINDS_HEADER] = kinds
         try:
             request = self._client.build_request(
                 method, url, headers=headers, content=content, **self._timeout
@@ -514,7 +523,11 @@ class Adapter:
                 return credential
             authorization, cookies = credential
 
-        external = route.delivery and self._deliver is not None
+        # The API counts a notice it hands back as the owner being told, so it is
+        # asked for one only when the application has said it delivers both kinds.
+        # Otherwise the API sends the notice itself.
+        notices = route.notices and NOTICE_KINDS.issubset(self._delivered_kinds)
+        external = (route.delivery or notices) and self._deliver is not None
         try:
             res = self._call(
                 forwarded,
@@ -529,6 +542,7 @@ class Adapter:
                     else self._proxy_authorization()
                 ),
                 external_delivery=external,
+                delivery_kinds=sorted(NOTICE_KINDS) if notices else (),
                 stream=True,
             )
         except _UpstreamError as err:
@@ -545,21 +559,16 @@ class Adapter:
             failed.set = cookies
             return failed
 
-        if route.delivery and isinstance(data, dict):
-            # The message is the application's to send. It never goes back to the
+        if (route.delivery or route.notices) and isinstance(data, dict):
+            # Messages are the application's to send. They never go back to the
             # caller, in either transport.
             raw_delivery = data.pop("delivery", None)
-            if raw_delivery is not None and external and self._deliver is not None:
-                try:
-                    self._deliver(parse_delivery(raw_delivery))
-                except Exception as err:
-                    log.warning(
-                        "[seamless-auth] Delivery for %s %s failed: %s",
-                        route.method,
-                        route.path,
-                        err,
-                    )
-                    return _Reply(502, {"error": "delivery_failed"}, set=cookies)
+            raw_deliveries = data.pop("deliveries", None)
+            pending = [raw_delivery] if raw_delivery is not None and route.delivery else []
+            if route.notices and isinstance(raw_deliveries, list):
+                pending.extend(raw_deliveries)
+            if pending and external and not self._send_deliveries(route, pending):
+                return _Reply(502, {"error": "delivery_failed"}, set=cookies)
 
         reply = _Reply(res.status_code, set=cookies)
         reply.clear = [self._config.cookie_name(held) for held in route.clears]
@@ -587,6 +596,49 @@ class Adapter:
 
         reply.body = data if bearer or data is None else _cookie_transport_body(route.pick, data)
         return reply
+
+    def _send_deliveries(self, route: ManifestRoute, pending: list[Any]) -> bool:
+        """Hands each message to the application. Every one is attempted, so one
+        failed transport does not keep a notice from the account's other address. A
+        kind this adapter does not deliver is logged and skipped."""
+        deliver = self._deliver
+        if deliver is None:
+            return True
+        ok = True
+        for raw in pending:
+            try:
+                delivery = parse_delivery(raw)
+            except ValueError as err:
+                log.warning(
+                    "[seamless-auth] Unusable delivery from %s %s: %s",
+                    route.method,
+                    route.path,
+                    err,
+                )
+                ok = False
+                continue
+            if delivery.kind not in self._delivered_kinds:
+                log.warning(
+                    "[seamless-auth] Skipping delivery kind %r from %s %s",
+                    delivery.kind[:64],
+                    route.method,
+                    route.path,
+                )
+                continue
+            try:
+                deliver(delivery)
+            except Exception as err:
+                # The type only: a message to the owner holds a cancel link, which an
+                # error from the transport may echo.
+                log.warning(
+                    "[seamless-auth] Delivery of %s for %s %s failed: %s",
+                    delivery.kind,
+                    route.method,
+                    route.path,
+                    type(err).__name__,
+                )
+                ok = False
+        return ok
 
     def _refresh_after_enrollment(
         self, headers: Headers, forwarded: _Forwarded, issued: list[CookieWrite]
