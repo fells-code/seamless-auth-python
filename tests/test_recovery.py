@@ -159,9 +159,7 @@ def test_without_notice_delivery_the_api_sends_the_notices(
     assert service_claims(recorded)["sub"] == PROXY_SUBJECT
 
 
-def test_a_failed_notice_is_reported_after_every_notice_is_tried(
-    api: FakeApi, caplog: pytest.LogCaptureFixture
-) -> None:
+def test_one_delivered_notice_is_enough(api: FakeApi, caplog: pytest.LogCaptureFixture) -> None:
     api.on("POST", "/recovery/verify", respond(200, {**VERIFIED, "deliveries": NOTICES}))
     tried: list[str] = []
 
@@ -174,9 +172,97 @@ def test_a_failed_notice_is_reported_after_every_notice_is_tried(
     with caplog.at_level(logging.DEBUG):
         r = call(adapter, "POST", "/recovery/verify", body='{"code":"1"}', cookie=pre_auth())
 
-    assert (r.status, r.body) == (502, {"error": "delivery_failed"})
+    assert (r.status, r.body) == (200, VERIFIED)
     assert tried == ["account_notice_email", "account_notice_sms"]
+    assert not api.calls_to("POST", "/recovery/cancel")
     assert "cancel-token-secret" not in caplog.text
+
+
+@pytest.mark.parametrize("bearer", [False, True])
+def test_when_no_notice_is_delivered_the_request_is_cancelled(
+    api: FakeApi, bearer: bool, caplog: pytest.LogCaptureFixture
+) -> None:
+    api.on("POST", "/recovery/verify", respond(200, {**VERIFIED, "deliveries": NOTICES}))
+    api.on("POST", "/recovery/cancel", respond(200, {"message": "ok"}))
+    tried: list[str] = []
+
+    def deliver(d: Delivery) -> None:
+        tried.append(d.kind)
+        raise RuntimeError(f"transport down for {d.cancel_url}")
+
+    adapter = api.adapter(deliver=deliver, deliver_account_notices=True)
+    with caplog.at_level(logging.DEBUG):
+        r = call(
+            adapter,
+            "POST",
+            "/recovery/verify",
+            body='{"code":"1"}',
+            cookie=None if bearer else pre_auth(),
+            headers=BEARER if bearer else None,
+        )
+
+    assert (r.status, r.body) == (503, {"error": "recovery_notice_failed"})
+    assert tried == ["account_notice_email", "account_notice_sms"]
+    cancelled = api.calls_to("POST", "/recovery/cancel")
+    assert len(cancelled) == 1
+    assert json.loads(cancelled[0].body) == {"cancelToken": "cancel-token-secret"}
+    assert "authorization" not in cancelled[0].headers
+    assert service_claims(cancelled[0])["sub"] == PROXY_SUBJECT
+    assert "cancel-token-secret" not in caplog.text
+
+
+def test_a_failed_cancel_still_answers_recovery_notice_failed(
+    api: FakeApi, caplog: pytest.LogCaptureFixture
+) -> None:
+    api.on("POST", "/recovery/verify", respond(200, {**VERIFIED, "deliveries": NOTICES}))
+    api.on("POST", "/recovery/cancel", respond(500, {"error": "internal"}))
+
+    def deliver(_d: Delivery) -> None:
+        raise RuntimeError("down")
+
+    adapter = api.adapter(deliver=deliver, deliver_account_notices=True)
+    with caplog.at_level(logging.DEBUG):
+        r = call(adapter, "POST", "/recovery/verify", body='{"code":"1"}', cookie=pre_auth())
+
+    assert (r.status, r.body) == (503, {"error": "recovery_notice_failed"})
+    assert "Could not cancel" in caplog.text
+    assert "cancel-token-secret" not in caplog.text
+
+
+def test_only_unknown_notice_kinds_count_as_none_delivered(api: FakeApi) -> None:
+    unknown = [{"kind": "account_notice_push", "to": "device-1", "cancelUrl": CANCEL_URL}]
+    api.on("POST", "/recovery/verify", respond(200, {**VERIFIED, "deliveries": unknown}))
+    api.on("POST", "/recovery/cancel", respond(200, {"message": "ok"}))
+    got, deliver = capture()
+
+    r = call(
+        api.adapter(deliver=deliver, deliver_account_notices=True),
+        "POST",
+        "/recovery/verify",
+        body='{"code":"1"}',
+        cookie=pre_auth(),
+    )
+
+    assert (r.status, r.body) == (503, {"error": "recovery_notice_failed"})
+    assert not got
+    assert len(api.calls_to("POST", "/recovery/cancel")) == 1
+
+
+def test_a_resumed_request_with_no_notices_answers_normally(api: FakeApi) -> None:
+    api.on("POST", "/recovery/verify", respond(200, VERIFIED))
+    got, deliver = capture()
+
+    r = call(
+        api.adapter(deliver=deliver, deliver_account_notices=True),
+        "POST",
+        "/recovery/verify",
+        body='{"code":"1"}',
+        cookie=pre_auth(),
+    )
+
+    assert (r.status, r.body) == (200, VERIFIED)
+    assert not got
+    assert not api.calls_to("POST", "/recovery/cancel")
 
 
 def test_recovery_notice_failed_passes_through(api: FakeApi) -> None:

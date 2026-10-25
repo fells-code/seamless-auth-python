@@ -564,11 +564,20 @@ class Adapter:
             # caller, in either transport.
             raw_delivery = data.pop("delivery", None)
             raw_deliveries = data.pop("deliveries", None)
-            pending = [raw_delivery] if raw_delivery is not None and route.delivery else []
-            if route.notices and isinstance(raw_deliveries, list):
-                pending.extend(raw_deliveries)
-            if pending and external and not self._send_deliveries(route, pending):
+            if (
+                route.delivery
+                and raw_delivery is not None
+                and external
+                and self._send_deliveries(route, [raw_delivery])[1]
+            ):
                 return _Reply(502, {"error": "delivery_failed"}, set=cookies)
+            if notices and isinstance(raw_deliveries, list) and raw_deliveries:
+                delivered, _ = self._send_deliveries(route, raw_deliveries)
+                if not delivered:
+                    # The API opened the request on the strength of these notices.
+                    # Unseen by the owner, it must not be left to complete.
+                    self._cancel_recovery(forwarded, raw_deliveries)
+                    return _Reply(503, {"error": "recovery_notice_failed"}, set=cookies)
 
         reply = _Reply(res.status_code, set=cookies)
         reply.clear = [self._config.cookie_name(held) for held in route.clears]
@@ -597,14 +606,16 @@ class Adapter:
         reply.body = data if bearer or data is None else _cookie_transport_body(route.pick, data)
         return reply
 
-    def _send_deliveries(self, route: ManifestRoute, pending: list[Any]) -> bool:
-        """Hands each message to the application. Every one is attempted, so one
-        failed transport does not keep a notice from the account's other address. A
-        kind this adapter does not deliver is logged and skipped."""
+    def _send_deliveries(self, route: ManifestRoute, pending: list[Any]) -> tuple[int, bool]:
+        """Hands each message to the application, and reports how many were sent and
+        whether any failed. Every one is attempted, so one failed transport does not
+        keep a notice from the account's other address. A kind this adapter does not
+        deliver is logged and skipped."""
         deliver = self._deliver
         if deliver is None:
-            return True
-        ok = True
+            return 0, False
+        sent = 0
+        failed = False
         for raw in pending:
             try:
                 delivery = parse_delivery(raw)
@@ -615,7 +626,7 @@ class Adapter:
                     route.path,
                     err,
                 )
-                ok = False
+                failed = True
                 continue
             if delivery.kind not in self._delivered_kinds:
                 log.warning(
@@ -637,8 +648,36 @@ class Adapter:
                     route.path,
                     type(err).__name__,
                 )
-                ok = False
-        return ok
+                failed = True
+                continue
+            sent += 1
+        return sent, failed
+
+    def _cancel_recovery(self, forwarded: _Forwarded, notices: list[Any]) -> None:
+        """Cancels the recovery request the notices report, with the token in the
+        fragment of their cancel link."""
+        token = next(filter(None, (_cancel_token(raw) for raw in notices)), None)
+        if token is None:
+            log.warning("[seamless-auth] Could not cancel an unannounced recovery: no cancel token")
+            return
+        try:
+            res = self._call(
+                forwarded,
+                "POST",
+                "/recovery/cancel",
+                body=json.dumps({"cancelToken": token}).encode(),
+                service=self._proxy_authorization(),
+                stream=True,
+            )
+        except _UpstreamError as err:
+            log.warning("[seamless-auth] Could not cancel an unannounced recovery: %s", err)
+            return
+        res.close()
+        if not 200 <= res.status_code < 300:
+            log.warning(
+                "[seamless-auth] Could not cancel an unannounced recovery: HTTP %s",
+                res.status_code,
+            )
 
     def _refresh_after_enrollment(
         self, headers: Headers, forwarded: _Forwarded, issued: list[CookieWrite]
@@ -983,6 +1022,14 @@ def _is_recovery_token(token: str) -> bool:
     """Whether an auth API token, verified before it was stored or forwarded, is a
     recovery session's. Only a literal ``true`` counts."""
     return bool(token) and (unverified_claims(token) or {}).get("recovery") is True
+
+
+def _cancel_token(raw: Any) -> str | None:
+    url = raw.get("cancelUrl") if isinstance(raw, dict) else None
+    if not isinstance(url, str):
+        return None
+    _, sep, fragment = url.partition("#")
+    return fragment if sep and fragment else None
 
 
 def _strip_bearer(authorization: str | None) -> str:

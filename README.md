@@ -213,10 +213,12 @@ Then `deliver` also receives `account_notice_email` (`to`, `subject`, `text`, `n
 `cancel_url`) and `account_notice_sms` (`to`, `text`, `notice`, `cancel_url`), one call per
 address. The auth API counts a notice it hands back as the owner being told, so turn this on only
 when `deliver` sends both kinds. `cancel_url` (and `text`, which contains it) is a credential that
-cancels the recovery: send it only to `to`, and never log it. If any notice fails, every other one
-is still attempted and the request answers 502 `delivery_failed`. Without the option, routes that
-carry notices are called without external delivery, so the auth API sends them through its own
-transports.
+cancels the recovery: send it only to `to`, and never log it. Every notice is attempted. One that
+gets through is enough, and the request answers as the auth API did. If none does, the owner has
+not been told, so the adapter cancels the recovery request (`POST /recovery/cancel` with the token
+from the cancel link) and answers 503 `recovery_notice_failed`, as the auth API itself would.
+Without the option, routes that carry notices are called without external delivery, so the auth
+API sends them through its own transports.
 
 ### Magic links
 
