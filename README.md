@@ -119,11 +119,11 @@ JSON it would be a sign-in the user never made. The client SDKs already send JSO
 | `auth_server_url` | required | Where the adapter reaches the auth API |
 | `auth_server_issuer` | the URL | Expected `iss` of the API's tokens, when it differs from the URL you reach it at |
 | `audience` | the issuer | Expected `aud` of the API's tokens |
-| `cookie_secret` | required | Signs the session cookies (32 bytes or more) |
-| `service_secret` | required | The service token, read from `SEAMLESS_SERVICE_TOKEN` in the examples; the same value as the API's `API_SERVICE_TOKEN` (32 bytes or more) |
+| `cookie_secret` | required | Signs the session cookies (32 bytes or more, and not a placeholder) |
+| `service_secret` | required | The service token, read from `SEAMLESS_SERVICE_TOKEN` in the examples; the same value as the API's `API_SERVICE_TOKEN` (32 bytes or more, and not a placeholder) |
 | `jwks_kid` | `dev-main` | `kid` header on service tokens |
 | `cookie_domain` | none | Cookie `Domain` |
-| `insecure_cookies` | `False` | Drops `Secure`, for local development over HTTP |
+| `insecure_cookies` | `False` | Drops `Secure`, and allows placeholder secrets, for local development over HTTP |
 | `same_site` | `None`, or `Lax` with `insecure_cookies` | Cookie `SameSite` |
 | `allowed_origins` | none | The only cross-origin callers allowed to change state while cookies are `SameSite=None` |
 | `access_cookie_name`, `refresh_cookie_name` | `seamless-access`, `seamless-refresh` | Session cookie names |
@@ -132,6 +132,10 @@ JSON it would be a sign-in the user never made. The client SDKs already send JSO
 | `resolve_client_ip` | the connecting peer | The end user's address. See below |
 | `disable_manifest_fetch` | `False` | Use only the manifest bundled with this version |
 | `http_client` | 15 second timeout, no redirects | Outbound `httpx2.Client` |
+
+The adapter refuses to start with a known placeholder for either secret, such as the starters'
+`dev-only-cookie-signing-key-replace-me`, `GRAB_FROM_SEAMLESS_AUTH_PORTAL_DEV`, or anything
+containing `replace-me`, unless `insecure_cookies` is set.
 
 ### Client IP
 

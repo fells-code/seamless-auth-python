@@ -47,6 +47,13 @@ MAX_BODY_BYTES = 1 << 20
 TRANSPORT_HEADER = "x-seamless-auth-transport"
 DELIVERY_MODE_HEADER = "x-seamless-auth-delivery-mode"
 
+# Example values from the starters and docs. Each is long enough to pass the length
+# check, and each is public.
+PLACEHOLDER_SECRETS = frozenset(
+    {"dev-only-cookie-signing-key-replace-me", "GRAB_FROM_SEAMLESS_AUTH_PORTAL_DEV"}
+)
+PLACEHOLDER_MARKER = "replace-me"
+
 # The auth API validates service tokens against a fixed issuer and audience,
 # whatever the adopter's own audience is.
 SERVICE_ISSUER = "seamless-portal-api"
@@ -178,6 +185,16 @@ class Adapter:
             raise ValueError(
                 f"seamless-auth: service_secret must be at least {MIN_SECRET_LENGTH} bytes"
             )
+        if not insecure_cookies:
+            for option, secret in (
+                ("cookie_secret", cookie_secret),
+                ("service_secret", service_secret),
+            ):
+                if _is_placeholder(secret):
+                    raise ValueError(
+                        f"seamless-auth: {option} is a placeholder value. Generate a real "
+                        "secret (it is allowed only with insecure_cookies, for local development)"
+                    )
         for name in (
             access_cookie_name,
             refresh_cookie_name,
@@ -837,6 +854,10 @@ def _is_access_token(token: str) -> bool:
     against the API's key set before the adapter signed it into the cookie, so its
     claims are read without verifying it again."""
     return bool(token) and str_claim(unverified_claims(token), "typ") == "access"
+
+
+def _is_placeholder(secret: str) -> bool:
+    return secret in PLACEHOLDER_SECRETS or PLACEHOLDER_MARKER in secret.lower()
 
 
 def _user_from(claims: Claims, token: str) -> User:
