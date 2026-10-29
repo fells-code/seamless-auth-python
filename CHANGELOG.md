@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.3.0](https://github.com/fells-code/seamless-auth-python/compare/v0.2.2...v0.3.0) (2026-10-25)
+
+
+### Added
+
+* deliver account recovery notices and serve the v0.20 recovery routes ([9ebf903](https://github.com/fells-code/seamless-auth-python/commit/9ebf903a4e33bf18513be465b11cb606b6296e1f)), closes [#13](https://github.com/fells-code/seamless-auth-python/issues/13)
+* refuse recovery sessions in the guard and refresh after enrollment ([94e381d](https://github.com/fells-code/seamless-auth-python/commit/94e381d4f6a6165aa151a0d5a81bd676c4493f88))
+* v0.20 recovery sessions, account notice delivery and console headers ([8247e20](https://github.com/fells-code/seamless-auth-python/commit/8247e20a6028db4a0b0bdffc4cb3fc1f58e7ec04))
+
+
+### Fixed
+
+* cancel a recovery request when no owner notice is delivered ([15d0fdf](https://github.com/fells-code/seamless-auth-python/commit/15d0fdf68e753b99ad2a26476bf85ca3311f9b0f)), closes [#13](https://github.com/fells-code/seamless-auth-python/issues/13)
+* **console:** keep the API's framing and sniffing headers on the console proxy ([2ab4430](https://github.com/fells-code/seamless-auth-python/commit/2ab4430f5733cf2cd2157d3b8bbb2b0f193586cc)), closes [#12](https://github.com/fells-code/seamless-auth-python/issues/12)
+* refuse known placeholder secrets at startup ([731a719](https://github.com/fells-code/seamless-auth-python/commit/731a719a814d4e6abb6d9b41c78e789961905e2b))
+
+
+### Documentation
+
+* link the governance document and license pledge ([3478bcf](https://github.com/fells-code/seamless-auth-python/commit/3478bcf36492742ba1b4d1fc51d900bb9c50f943))
+* link the governance document and license pledge ([44fe697](https://github.com/fells-code/seamless-auth-python/commit/44fe697feef842946c9081ec13b916882f05c518))
+
 ## [0.2.2](https://github.com/fells-code/seamless-auth-python/compare/v0.2.1...v0.2.2) (2026-10-18)
 
 
