@@ -868,26 +868,48 @@ class Adapter:
     def _session_of(self, headers: Headers) -> tuple[User, bool]:
         name = self._config.access_cookie_name
         if raw_cookie(headers, name):
-            claims = read_cookie(self._config, headers, name, KIND_ACCESS)
-            token = str_claim(claims, "token")
-            if claims is None or not str_claim(claims, "sub") or not _is_access_token(token):
+            cookie = read_cookie(self._config, headers, name, KIND_ACCESS)
+            subject = str_claim(cookie, "sub")
+            token = str_claim(cookie, "token")
+            if cookie is None or not subject or not token:
                 raise Unauthenticated
-            return _user_from(claims, token, _is_recovery_token(token)), True
+            # The cookie secret alone can sign a cookie. Holding the token inside it to
+            # the API's key set means a forged cookie cannot carry claims of its own.
+            claims = self._verified_access_token(token)
+            if str_claim(claims, "sub") != subject:
+                raise Unauthenticated
+            return (
+                User(
+                    id=subject,
+                    roles=_roles(claims),
+                    email=str_claim(cookie, "email") or None,
+                    phone=str_claim(cookie, "phone") or None,
+                    recovery=claims.get("recovery") is True,
+                    token=token,
+                ),
+                True,
+            )
 
         bearer = _bearer_token(headers)
         if bearer is None:
             raise Unauthenticated
+        claims = self._verified_access_token(bearer)
+        return _user_from(claims, bearer, claims.get("recovery") is True), False
+
+    def _verified_access_token(self, token: str) -> Claims:
+        """The claims of an auth API access token, verified against its key set."""
+        issuer, audience = self._config.auth_server_issuer, self._config.audience
+        if not issuer or not audience:
+            raise Unauthenticated
         try:
-            claims = self._jwks.verify(
-                bearer, self._config.auth_server_issuer, self._config.audience
-            )
+            claims = self._jwks.verify(token, issuer, audience)
         except TokenError as err:
             raise Unauthenticated from err
         # An ephemeral sign-in token is signed by the same key, so the type is what
         # keeps it from passing for a session.
         if str_claim(claims, "typ") != "access" or not str_claim(claims, "sub"):
             raise Unauthenticated
-        return _user_from(claims, bearer, claims.get("recovery") is True), False
+        return claims
 
     def _check_origin(self, method: str, headers: Headers) -> _Reply | None:
         """Blocks cross-site state changes while cookies are SameSite=None, which is
@@ -898,22 +920,33 @@ class Adapter:
             return None
         blocked = _error(403, "cross_site_request_blocked")
 
+        origin = headers.get("origin")
         site = headers.get("sec-fetch-site")
         if site is not None:
-            return blocked if site.lower() == "cross-site" else None
-        origin = headers.get("origin")
+            site = site.lower()
+            if site == "cross-site":
+                return blocked
+            # same-site also covers a sibling subdomain, so an adopter who listed
+            # allowed origins gets the Origin held to that list.
+            if site != "same-site" or not self._config.allowed_origins:
+                return None
+            return None if origin is not None and self._is_allowed_origin(origin) else blocked
         if origin is None:
             return None
         if origin == "null":
             return blocked
         if not self._config.allowed_origins:
             return None
+        return None if self._is_allowed_origin(origin) else blocked
+
+    def _is_allowed_origin(self, origin: str) -> bool:
         normalized = _normalize_origin(origin)
-        if normalized and any(
+        # Checked so an unparseable Origin cannot match an unparseable allowlist entry.
+        if not normalized:
+            return False
+        return any(
             _normalize_origin(allowed) == normalized for allowed in self._config.allowed_origins
-        ):
-            return None
-        return blocked
+        )
 
 
 _NO_REFRESH_COOKIE = "no refresh cookie"
@@ -1011,13 +1044,6 @@ def _bearer_token(headers: Headers) -> str | None:
     return None
 
 
-def _is_access_token(token: str) -> bool:
-    """Reads the type of the auth API token inside a session cookie. It was verified
-    against the API's key set before the adapter signed it into the cookie, so its
-    claims are read without verifying it again."""
-    return bool(token) and str_claim(unverified_claims(token), "typ") == "access"
-
-
 def _is_recovery_token(token: str) -> bool:
     """Whether an auth API token, verified before it was stored or forwarded, is a
     recovery session's. Only a literal ``true`` counts."""
@@ -1040,11 +1066,15 @@ def _is_placeholder(secret: str) -> bool:
     return secret in PLACEHOLDER_SECRETS or PLACEHOLDER_MARKER in secret.lower()
 
 
-def _user_from(claims: Claims, token: str, recovery: bool) -> User:
+def _roles(claims: Claims) -> tuple[str, ...]:
     roles = claims.get("roles")
+    return tuple(r for r in roles if isinstance(r, str)) if isinstance(roles, list) else ()
+
+
+def _user_from(claims: Claims, token: str, recovery: bool) -> User:
     return User(
         id=str_claim(claims, "sub"),
-        roles=tuple(r for r in roles if isinstance(r, str)) if isinstance(roles, list) else (),
+        roles=_roles(claims),
         email=str_claim(claims, "email") or None,
         phone=str_claim(claims, "phone") or None,
         recovery=recovery,

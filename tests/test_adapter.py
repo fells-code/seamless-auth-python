@@ -531,6 +531,60 @@ def test_cross_site_state_changes_are_blocked(api: FakeApi) -> None:
     assert r.status == 400
 
 
+APP = "https://app.example"
+ORIGIN_CASES = [
+    # (allowlist, same_site, method, sec-fetch-site, origin, blocked)
+    ((), "None", "POST", "cross-site", None, True),
+    ((), "None", "POST", "same-origin", None, False),
+    ((), "None", "POST", "same-site", None, False),
+    ((), "None", "POST", "same-site", "https://evil.example", False),
+    ((), "None", "POST", None, None, False),
+    ((), "None", "POST", None, "null", True),
+    ((), "None", "POST", None, "https://evil.example", False),
+    ((), "None", "GET", "cross-site", None, False),
+    ((), "None", "OPTIONS", "cross-site", None, False),
+    ((), "Lax", "POST", "cross-site", None, False),
+    ((APP,), "Lax", "POST", "same-site", "https://evil.example", False),
+    ((APP,), "None", "POST", None, APP, False),
+    ((APP,), "None", "POST", None, "https://evil.example", True),
+    # A sibling subdomain is same-site, so the header alone cannot tell it from the app.
+    ((APP,), "None", "POST", "same-site", "https://evil.example", True),
+    ((APP,), "None", "POST", "same-site", None, True),
+    ((APP,), "None", "POST", "same-site", "null", True),
+    ((APP,), "None", "POST", "same-site", "https://APP.example", False),
+    ((APP,), "None", "POST", "SAME-SITE", APP, False),
+    ((APP,), "None", "POST", "same-origin", "https://adapter.example", False),
+    ((APP,), "None", "POST", "same-origin", None, False),
+    ((APP,), "None", "POST", "none", None, False),
+    ((APP,), "None", "POST", "cross-site", APP, True),
+    ((APP,), "None", "POST", "Cross-Site", APP, True),
+    ((APP,), "None", "GET", "same-site", "https://evil.example", False),
+    # Neither normalizes to an origin, so neither can match the other.
+    (("not an origin",), "None", "POST", "same-site", "also not one", True),
+    (("not an origin",), "None", "POST", None, "also not one", True),
+    (("",), "None", "POST", "same-site", "", True),
+]
+
+
+OriginCase = tuple[tuple[str, ...], str, str, str | None, str | None, bool]
+
+
+@pytest.mark.parametrize("case", ORIGIN_CASES)
+def test_the_origin_check(api: FakeApi, case: OriginCase) -> None:
+    allowlist, same_site, method, site, origin, blocked = case
+    api.on(method, "/login", respond(400, {"error": "invalid_request"}))
+    adapter = api.adapter(allowed_origins=allowlist, same_site=same_site)
+    headers = {k: v for k, v in (("sec-fetch-site", site), ("origin", origin)) if v is not None}
+
+    r = call(adapter, method, "/login", body="{}" if method == "POST" else None, headers=headers)
+
+    if blocked:
+        assert (r.status, r.body) == (403, {"error": "cross_site_request_blocked"})
+        assert not api.calls_to(method, "/login")
+    else:
+        assert r.status != 403, r.text
+
+
 def test_the_live_manifest_adds_routes(api: FakeApi) -> None:
     api.manifest = {
         "schemaVersion": 1,

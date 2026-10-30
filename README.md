@@ -105,10 +105,25 @@ are present. It does not refresh: the auth routes refresh a browser session sile
 client calls `POST /auth/refresh` itself. `Adapter.authenticate(headers)` does the same check
 anywhere else.
 
-A request the guard admits on the session cookie also gets the auth routes' cross-site check:
-while cookies are `SameSite=None`, a state-changing request from another site (`Sec-Fetch-Site:
-cross-site`, or an `Origin` outside `allowed_origins`) answers 403. A bearer token is never
-attached by a browser, so it is not checked.
+The session cookie is signed with `cookie_secret`, and the guard also verifies the auth API access
+token inside it against the API's key set, as it does a bearer token: RS256, the expected issuer
+and audience, in date, `typ: access`, and the same `sub` as the cookie. `User.roles` and
+`User.recovery` come from that verified token, not from the cookie, so a forged cookie cannot carry
+claims of its own even if the cookie secret leaks. The first request with a new key fetches the key
+set, and when it cannot be fetched the guard answers 401.
+
+A request the guard admits on the session cookie also gets the auth routes' cross-site check,
+while cookies are `SameSite=None` and only for methods other than `GET`, `HEAD` and `OPTIONS`:
+
+- `Sec-Fetch-Site: cross-site` answers 403.
+- `Sec-Fetch-Site: same-site` also covers a sibling subdomain, so when `allowed_origins` is set the
+  request must carry an `Origin` on that list, or it answers 403. Without `allowed_origins` it
+  passes.
+- `Sec-Fetch-Site: same-origin` (or `none`) passes.
+- With no `Sec-Fetch-Site`, an `Origin: null` answers 403, and when `allowed_origins` is set any
+  other `Origin` must be on it. A request with neither header passes.
+
+A bearer token is never attached by a browser, so it is not checked.
 
 ### Recovery sessions
 
