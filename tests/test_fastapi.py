@@ -1,7 +1,17 @@
 from __future__ import annotations
 
 import httpx2
-from conftest import API_URL, FakeApi, access, api_token, pre_auth, respond, session, signed_cookie
+from conftest import (
+    API_URL,
+    FakeApi,
+    access,
+    api_token,
+    hs256_access_token,
+    pre_auth,
+    respond,
+    session,
+    signed_cookie,
+)
 from fastapi import Depends, FastAPI
 from fastapi.testclient import TestClient
 
@@ -125,6 +135,12 @@ def test_the_guard(api: FakeApi) -> None:
         "/api/transfer", headers={"cookie": session_cookie, "sec-fetch-site": "same-origin"}
     )
     assert r.status_code == 200
+
+    # A valid cookie signature does not make the token inside it the API's.
+    forged = signed_cookie("seamless-access", {"sub": "u1", "token": hs256_access_token()})
+    assert client.get("/api/me", headers={"cookie": forged}).status_code == 401
+    other = signed_cookie("seamless-access", {"sub": "u1", "token": api_token("u2", "access")})
+    assert client.get("/api/me", headers={"cookie": other}).status_code == 401
 
 
 def test_the_guard_refuses_a_recovery_session_unless_allowed(api: FakeApi) -> None:

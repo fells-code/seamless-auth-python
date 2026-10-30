@@ -12,6 +12,7 @@ from conftest import (
     FakeApi,
     access,
     api_token,
+    hs256_access_token,
     pre_auth,
     respond,
     session,
@@ -132,6 +133,13 @@ def test_the_guard(client: Client) -> None:
     )
     r = client.post("/api/transfer", HTTP_COOKIE=session_cookie, HTTP_SEC_FETCH_SITE="same-origin")
     assert r.status_code == 200
+
+    # A valid cookie signature does not make the token inside it the API's.
+    forged = signed_cookie("seamless-access", {"sub": "u1", "token": hs256_access_token()})
+    assert client.get("/api/me", HTTP_COOKIE=forged).status_code == 401
+    other = signed_cookie("seamless-access", {"sub": "u1", "token": api_token("u2", "access")})
+    assert client.get("/api/me", HTTP_COOKIE=other).status_code == 401
+    assert client.get("/api/me-async", HTTP_COOKIE=other).status_code == 401
 
 
 def test_the_guard_refuses_a_recovery_session_unless_allowed(client: Client) -> None:
