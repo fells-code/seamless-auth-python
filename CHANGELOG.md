@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.4.0](https://github.com/fells-code/seamless-auth-python/compare/v0.3.0...v0.4.0) (2026-10-31)
+
+
+### Added
+
+* verify-only resource server mode with audience, scope, role and step-up guards ([f5b58bf](https://github.com/fells-code/seamless-auth-python/commit/f5b58bfc6eeee24af3161505e6800a6d70349605))
+* verify-only resource server mode with audience, scope, role and step-up guards ([8187925](https://github.com/fells-code/seamless-auth-python/commit/8187925c5d9afb294c242860a8f2d06c2203e22b))
+
+
+### Fixed
+
+* Origin allowlist with Sec-Fetch-Site, and verify the cookie's inner access token ([2e52141](https://github.com/fells-code/seamless-auth-python/commit/2e521414a22c6ea8f3e4463d384a0a45cb2517f9))
+* Origin allowlist with Sec-Fetch-Site, and verify the cookie's inner access token ([46af635](https://github.com/fells-code/seamless-auth-python/commit/46af63556f4665f46395ff212dde2c665f11cee6)), closes [#15](https://github.com/fells-code/seamless-auth-python/issues/15)
+
 ## [0.3.0](https://github.com/fells-code/seamless-auth-python/compare/v0.2.2...v0.3.0) (2026-10-25)
 
 
