@@ -217,6 +217,10 @@ An OTP code from `POST /recovery/start` carries `purpose="account_recovery"`
 (`Delivery.is_account_recovery`): word that message as an account recovery code, with a warning
 to ignore it if the user did not ask, not as a sign-in code.
 
+An `enrollment_invite_email` carries `sign_in_url`, the `signInUrl` of
+`SendEnrollmentInviteEmailInput` in `@seamless-auth/types`: the sign-in page, which signs nobody
+in on its own.
+
 #### Account notices
 
 When account recovery opens (`POST /recovery/verify`), the auth API tells the account's owner at
@@ -237,6 +241,30 @@ not been told, so the adapter cancels the recovery request (`POST /recovery/canc
 from the cancel link) and answers 503 `recovery_notice_failed`, as the auth API itself would.
 Without the option, routes that carry notices are called without external delivery, so the auth
 API sends them through its own transports.
+
+#### Unsubscribe headers
+
+The adapter hands you what the auth API asked for; your mailer builds and sends the email. So
+custom headers, such as the one-click unsubscribe pair from
+[RFC 8058](https://www.rfc-editor.org/rfc/rfc8058), are set in your own sender, not passed through
+the adapter. Sign-in codes, magic links and enrollment invites are transactional and do not need
+them; mail your application sends on its own, such as release notes, does:
+
+```python
+from email.message import EmailMessage
+
+msg = EmailMessage()
+msg["To"] = user.email
+msg["Subject"] = "What's new"
+msg["List-Unsubscribe"] = f"<https://app.example.com/unsubscribe?t={token}>"
+msg["List-Unsubscribe-Post"] = "List-Unsubscribe=One-Click"
+msg.set_content(body)
+smtp.send_message(msg)
+```
+
+The unsubscribe URL must be HTTPS and accept a POST with no further confirmation. Refuse header
+values that contain a CR or LF, and never let a caller set From, To, Cc, Bcc, Subject or
+Content-Type through custom headers, as `@seamless-auth/messaging` does.
 
 ### Magic links
 
