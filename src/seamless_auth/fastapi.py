@@ -15,16 +15,29 @@
     @app.get("/api/me")
     def me(user: User = Depends(current_user)):
         return {"id": user.id}
+
+Verify-only, for an API that only receives OpenID Provider access tokens::
+
+    from seamless_auth import ResourceServer, VerifiedUser, require_scope
+    from seamless_auth.fastapi import RequireBearer, add_bearer_error_handler
+
+    rs = ResourceServer(issuer="https://login.example.com", audience="https://api.example.com")
+    app = FastAPI()
+    add_bearer_error_handler(app)
+
+    @app.get("/orders")
+    def orders(user: VerifiedUser = Depends(RequireBearer(rs, require_scope("orders:read")))):
+        return {"sub": user.sub}
 """
 
 from __future__ import annotations
 
 from urllib.parse import quote
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, FastAPI, HTTPException, Request
 from starlette.background import BackgroundTask
 from starlette.concurrency import run_in_threadpool
-from starlette.responses import Response, StreamingResponse
+from starlette.responses import JSONResponse, Response, StreamingResponse
 
 from ._adapter import (
     MAX_BODY_BYTES,
@@ -35,8 +48,17 @@ from ._adapter import (
     User,
 )
 from ._http import AuthRequest, AuthResponse, Headers
+from ._resource_server import BearerError, BearerRequest, Guard, ResourceServer, VerifiedUser
 
-__all__ = ["RequireUser", "auth_router", "console_router"]
+__all__ = [
+    "BearerHTTPException",
+    "RequireBearer",
+    "RequireUser",
+    "add_bearer_error_handler",
+    "auth_router",
+    "bearer_exception_handler",
+    "console_router",
+]
 
 _METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]
 # What a path segment may keep when a raw path has to be rebuilt from a decoded one.
@@ -100,6 +122,53 @@ class RequireUser:
             raise HTTPException(status_code=403, detail="cross_site_request_blocked") from None
         except Unauthenticated:
             raise HTTPException(status_code=401, detail="unauthenticated") from None
+
+
+class BearerHTTPException(HTTPException):
+    """A verify-only refusal. :func:`bearer_exception_handler` answers it with the
+    exact JSON body; without the handler FastAPI still sends its status and
+    ``WWW-Authenticate``, with the body under ``detail``."""
+
+    def __init__(self, error: BearerError) -> None:
+        super().__init__(error.status, detail=error.body, headers=error.headers() or None)
+        self.body = error.body
+
+
+def bearer_exception_handler(request: Request, exc: Exception) -> Response:
+    if not isinstance(exc, BearerHTTPException):
+        raise exc
+    return JSONResponse(exc.body, status_code=exc.status_code, headers=exc.headers)
+
+
+def add_bearer_error_handler(app: FastAPI) -> None:
+    """Answers :class:`RequireBearer` refusals with the shared verify-only bodies,
+    such as ``{"error": "insufficient_scope", "scope": "orders:read"}``."""
+    app.add_exception_handler(BearerHTTPException, bearer_exception_handler)
+
+
+class RequireBearer:
+    """A dependency that verifies the request's OpenID Provider access token, runs
+    ``guards`` in order, and returns the :class:`~seamless_auth.VerifiedUser`.
+
+    A plain function, so FastAPI runs it on its threadpool: the first request may
+    fetch the provider's discovery document and key set.
+    """
+
+    def __init__(self, server: ResourceServer, *guards: Guard) -> None:
+        self._server = server
+        self._guards = guards
+
+    def __call__(self, request: Request) -> VerifiedUser:
+        values = request.headers.getlist("authorization")
+        bearer = BearerRequest(request.method, _headers(request), lambda: str(request.url))
+        try:
+            # More than one Authorization header is not one token.
+            user = self._server.authenticate(values[0] if len(values) == 1 else None, bearer)
+            for guard in self._guards:
+                guard.check(user)
+        except BearerError as err:
+            raise BearerHTTPException(err) from None
+        return user
 
 
 def _headers(request: Request) -> Headers:

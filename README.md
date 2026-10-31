@@ -15,6 +15,9 @@ The adapter sits in your backend between your users and the Seamless Auth API:
 Which routes the adapter serves, and what each does to the session, comes from the adapter
 manifest the auth API publishes, so a new API route works without a new release of this package.
 
+For an API that only checks access tokens from the Seamless OpenID Provider, the package also has a
+[verify-only mode](#verify-only-resource-servers) that needs just the issuer and an audience.
+
 It is held to the same [conformance suite](https://github.com/fells-code/seamless-cli/blob/main/verify/CONFORMANCE.md)
 as the Express, Fastify, Go and Rust adapters, with a FastAPI and a Django reference app, in CI on
 every change.
@@ -272,6 +275,146 @@ encoded separators), and follows a redirect only while it stays inside the conso
 It keeps the auth API's `X-Frame-Options`, `Content-Security-Policy` and `X-Content-Type-Options`,
 so the console cannot be framed on your origin. When you serve it, add your API's origin to the auth server's `ORIGINS` so passkey ceremonies
 started in the console verify.
+
+## Verify-only resource servers
+
+An API that only receives access tokens from the Seamless OpenID Provider (RFC 9068 JWTs, sent as
+`Authorization: Bearer`) needs none of the adapter: no cookies, no service secret, no auth routes.
+`ResourceServer` takes the provider's issuer and this API's resource identifier, and nothing else:
+
+```python
+from seamless_auth import ResourceServer
+
+rs = ResourceServer(
+    issuer="https://login.example.com",  # the API's oidc_issuer
+    audience="https://api.example.com",  # this API's resource identifier
+)
+```
+
+### FastAPI
+
+```python
+from fastapi import Depends, FastAPI
+from seamless_auth import VerifiedUser, require_role, require_scope, require_step_up
+from seamless_auth.fastapi import RequireBearer, add_bearer_error_handler
+
+app = FastAPI()
+add_bearer_error_handler(app)
+
+read_orders = RequireBearer(rs, require_scope("orders:read"))
+refund = RequireBearer(
+    rs, require_scope("orders:write"), require_step_up(acr_values=["phr"], max_age=300)
+)
+
+
+@app.get("/orders")
+def orders(user: VerifiedUser = Depends(read_orders)):
+    return {"sub": user.sub, "org": user.org_id}
+
+
+@app.post("/orders/{id}/refund")
+def refund_order(id: str, user: VerifiedUser = Depends(refund)): ...
+```
+
+`RequireBearer(rs, *guards)` verifies the token, runs the guards in order, and returns the
+`VerifiedUser`. `add_bearer_error_handler(app)` answers refusals with the JSON bodies below; without
+it FastAPI still sends the status and `WWW-Authenticate`, with the body under `detail`.
+
+### Django
+
+```python
+# settings.py
+SEAMLESS_RESOURCE_SERVER = {
+    "issuer": os.environ["OIDC_ISSUER"],
+    "audience": os.environ["API_AUDIENCE"],
+}
+
+# views.py
+from django.http import JsonResponse
+from django.views.decorators.csrf import csrf_exempt
+from seamless_auth.django import bearer_user_of, require_bearer, require_scope, require_step_up
+
+
+@require_bearer
+@require_scope("orders:read")
+def orders(request):
+    return JsonResponse({"sub": bearer_user_of(request).sub})
+
+
+@csrf_exempt  # bearer only: no cookie for a cross-site request to ride on
+@require_bearer
+@require_scope("orders:write")
+@require_step_up(acr_values=["phr"], max_age=300)
+def refund(request, id): ...
+```
+
+`SEAMLESS_RESOURCE_SERVER` takes the keyword arguments of `ResourceServer`; `confirm` may be a
+dotted path. `@require_bearer` (or `@require_bearer(server=rs)`) verifies the token and puts the
+`VerifiedUser` on the request; the guard decorators go beneath it and run top to bottom. A guard
+with no `@require_bearer` above it answers as if there were no token. All of them work on sync and
+async views.
+
+### What is verified
+
+A token passes only if all of these hold, and anything else answers 401 `invalid_token`:
+
+- A compact JWS with header `alg: RS256`, `typ` of `at+jwt` or `application/at+jwt` (any case),
+  a `kid`, and no `crit`.
+- Signed by the key with that `kid` in the provider's key set, an RSA key whose `use` (if
+  present) is `sig` and whose `alg` (if present) is `RS256`.
+- `iss` equal to `issuer` exactly, and `aud` equal to `audience` or a list containing it.
+- In date: `exp` required, `nbf` optional, with 5 seconds of clock skew.
+- A non-empty `sub` and `client_id`, and no first-party `typ` claim.
+- No `cnf` (a sender-constrained token), unless a `confirm` hook accepts it (below).
+- `scope`, `acr`, `sid` strings, `amr` and `roles` lists of strings, `auth_time` a number and
+  `org_id` a string or null, where present.
+
+Keys come from `jwks_uri` when you pass one. Otherwise the first request fetches
+`<issuer>/.well-known/openid-configuration` (5 second timeout, 256 KiB at most), which must name
+the same `issuer` and an http(s) `jwks_uri` (https under an https issuer). Discovery succeeds once
+per process; a failure answers 401 and is retried at most every 5 seconds. The key set is cached
+as the adapter caches the auth API's: a new `kid` refetches it at most every 30 seconds, and it is
+fetched again after 10 minutes.
+
+`VerifiedUser` carries `sub`, `client_id`, `scopes` (the `scope` claim split on spaces), `roles`,
+`sid`, `org_id`, `acr`, `amr`, `auth_time`, `exp`, `iat`, the raw `token` and every `claims`. A
+client credentials token (`sub == client_id`, no user claims) is valid, and fails role and step-up
+guards.
+
+### Guards
+
+| Guard | Passes when | Otherwise |
+| --- | --- | --- |
+| `require_scope(*scopes)` | every scope is in `scopes`, exactly | 403 `{"error":"insufficient_scope","scope":"a b"}`, `WWW-Authenticate: Bearer error="insufficient_scope", scope="a b"` |
+| `require_role(*roles)` | any role is granted (`x:*` grants `x` and under, `billing` grants `billing:...`, `p:write` grants `p:read`) | 403 `{"error":"insufficient_role"}` |
+| `require_step_up(acr_values=, amr=, max_age=)` | `acr` is one of `acr_values` (`phr` also accepts `phrh`), every `amr` is present, and at most `max_age` seconds since `auth_time` | 401 `insufficient_user_authentication` (RFC 9470) |
+
+A missing token, a scheme other than `Bearer` or more than one token answers 401
+`{"error":"missing_token"}` with `WWW-Authenticate: Bearer`. A step-up refusal names what the client
+must ask the provider for, so it can send the user to sign in again:
+
+```
+WWW-Authenticate: Bearer error="insufficient_user_authentication",
+  error_description="More recent authentication is required", acr_values="phr", max_age="300"
+```
+
+with the same fields in the JSON body (`max_age` as a number). `role_grants_access(granted,
+required)` is the role matching on its own.
+
+### Sender-constrained tokens
+
+A token with a `cnf` claim is bound to a key the client must prove it holds (DPoP), so it is
+refused unless you pass `confirm`. The hook gets the `cnf` value and a `BearerRequest` (method,
+headers, absolute URL), and accepts the token by returning `True`. Anything else, including an
+exception, refuses it:
+
+```python
+def confirm(cnf, request):
+    return check_dpop_proof(cnf["jkt"], request.headers.get("DPoP"), request.method, request.url)
+
+
+rs = ResourceServer(issuer=..., audience=..., confirm=confirm)
+```
 
 ## How it runs
 

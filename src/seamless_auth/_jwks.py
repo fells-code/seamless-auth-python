@@ -6,6 +6,7 @@ import json
 import logging
 import threading
 import time
+from dataclasses import dataclass
 from typing import Any
 
 import httpx2
@@ -33,16 +34,26 @@ class TokenError(Exception):
     """A token the auth API was supposed to have signed did not verify."""
 
 
+@dataclass(frozen=True)
+class Jwk:
+    """A published RSA key, with the JWK members that constrain its use."""
+
+    key: RSAPublicKey
+    params: dict[str, Any]
+
+
 class JwksCache:
-    def __init__(self, auth_server_url: str, client: httpx2.Client) -> None:
-        self._url = f"{auth_server_url}/.well-known/jwks.json"
+    """The key set at ``url``, fetched on first use and kept fresh."""
+
+    def __init__(self, url: str, client: httpx2.Client) -> None:
+        self._url = url
         self._client = client
         self._lock = threading.Lock()
-        self._keys: dict[str, Any] | None = None
+        self._keys: dict[str, Jwk] | None = None
         self._fetched_at: float | None = None
         self._attempted_at: float | None = None
 
-    def _key(self, kid: str) -> Any:
+    def key(self, kid: str) -> Jwk:
         with self._lock:
             now = time.monotonic()
             fresh = self._fetched_at is not None and now - self._fetched_at < MAX_AGE
@@ -66,12 +77,12 @@ class JwksCache:
                 raise TokenError(f"unknown key id {kid!r}")
             return self._keys[kid]
 
-    def _fetch(self) -> dict[str, Any]:
+    def _fetch(self) -> dict[str, Jwk]:
         with self._client.stream("GET", self._url, timeout=FETCH_TIMEOUT) as res:
             if res.status_code != 200:
                 raise TokenError(f"HTTP {res.status_code}")
             body = read_limited(res, MAX_JWKS_BYTES)
-        keys: dict[str, Any] = {}
+        keys: dict[str, Jwk] = {}
         for jwk in json.loads(body).get("keys", []):
             if not isinstance(jwk, dict) or jwk.get("kty") != "RSA":
                 continue
@@ -84,7 +95,8 @@ class JwksCache:
             if isinstance(key, RSAPrivateKey):
                 key = key.public_key()
             if isinstance(key, RSAPublicKey):
-                keys[str(jwk.get("kid", ""))] = key
+                params = {k: jwk[k] for k in ("kid", "kty", "use", "alg", "key_ops") if k in jwk}
+                keys[str(jwk.get("kid", ""))] = Jwk(key, params)
         return keys
 
     def verify(self, token: str, issuer: str, audience: str) -> Claims:
@@ -97,7 +109,7 @@ class JwksCache:
         if header.get("alg") != "RS256":
             raise TokenError("unexpected algorithm")
         kid = header.get("kid")
-        key = self._key(kid if isinstance(kid, str) else "")
+        key = self.key(kid if isinstance(kid, str) else "").key
         try:
             claims: Claims = jwt.decode(
                 token,
