@@ -22,6 +22,25 @@ Configure the adapter in settings, include its URLs, and guard views::
 
 ``SEAMLESS_AUTH`` takes the keyword arguments of :class:`seamless_auth.Adapter`.
 ``deliver`` and ``resolve_client_ip`` may be dotted paths to callables.
+
+Verify-only, for an API that only receives OpenID Provider access tokens::
+
+    # settings.py
+    SEAMLESS_RESOURCE_SERVER = {
+        "issuer": "https://login.example.com",
+        "audience": "https://api.example.com",
+    }
+
+    # views.py
+    from seamless_auth.django import bearer_user_of, require_bearer, require_scope
+
+    @require_bearer
+    @require_scope("orders:read")
+    def orders(request):
+        return JsonResponse({"sub": bearer_user_of(request).sub})
+
+``SEAMLESS_RESOURCE_SERVER`` takes the keyword arguments of
+:class:`seamless_auth.ResourceServer`; ``confirm`` may be a dotted path.
 """
 
 from __future__ import annotations
@@ -50,19 +69,37 @@ from ._adapter import (
     User,
 )
 from ._http import AuthRequest, AuthResponse, Headers
+from ._resource_server import (
+    BearerError,
+    BearerRequest,
+    Guard,
+    ResourceServer,
+    VerifiedUser,
+    missing_token,
+)
+from ._resource_server import require_role as _role_guard
+from ._resource_server import require_scope as _scope_guard
+from ._resource_server import require_step_up as _step_up_guard
 
 __all__ = [
     "auth_view",
+    "bearer_user_of",
     "console_urlpatterns",
     "console_view",
     "get_adapter",
+    "get_resource_server",
     "require_auth",
+    "require_bearer",
+    "require_role",
+    "require_scope",
+    "require_step_up",
     "urlpatterns",
 ]
 
 _PATH_SAFE = "/:@!$&'()*+,;=-._~"
 _lock = threading.Lock()
 _adapter: Adapter | None = None
+_resource_server: ResourceServer | None = None
 
 F = TypeVar("F", bound=Callable[..., Any])
 
@@ -87,6 +124,30 @@ def _reset_adapter() -> None:
     global _adapter  # noqa: PLW0603
     with _lock:
         _adapter = None
+
+
+def get_resource_server() -> ResourceServer:
+    """The verifier configured by ``settings.SEAMLESS_RESOURCE_SERVER``, built on
+    first use."""
+    global _resource_server  # noqa: PLW0603
+    with _lock:
+        if _resource_server is None:
+            options = dict(getattr(settings, "SEAMLESS_RESOURCE_SERVER", None) or {})
+            if not options:
+                raise ImproperlyConfigured(
+                    "seamless-auth: set SEAMLESS_RESOURCE_SERVER in settings"
+                )
+            if isinstance(options.get("confirm"), str):
+                options["confirm"] = import_string(options["confirm"])
+            _resource_server = ResourceServer(**options)
+        return _resource_server
+
+
+def _reset_resource_server() -> None:
+    """Forgets the configured verifier, for tests that change settings."""
+    global _resource_server  # noqa: PLW0603
+    with _lock:
+        _resource_server = None
 
 
 @csrf_exempt
@@ -165,6 +226,103 @@ def _guard(view: F, allow_recovery: bool) -> F:
         return check(request) or view(request, *args, **kwargs)
 
     return cast(F, wrapper)
+
+
+@overload
+def require_bearer(view: F) -> F: ...
+@overload
+def require_bearer(*, server: ResourceServer | None = None) -> Callable[[F], F]: ...
+
+
+def require_bearer(view: F | None = None, *, server: ResourceServer | None = None) -> Any:
+    """Verifies the request's OpenID Provider access token and puts the
+    :class:`~seamless_auth.VerifiedUser` on ``request.seamless_bearer``. Answers 401
+    ``missing_token`` or ``invalid_token`` otherwise. Uses ``server``, or the one
+    ``settings.SEAMLESS_RESOURCE_SERVER`` configures. Put it above the
+    :func:`require_scope`, :func:`require_role` and :func:`require_step_up`
+    decorators; they run top to bottom after it. Works on sync and async views."""
+
+    def check(request: HttpRequest) -> HttpResponse | None:
+        values = request.headers.get("Authorization")
+        bearer = BearerRequest(
+            request.method or "GET", _headers(request), request.build_absolute_uri
+        )
+        try:
+            user = (server or get_resource_server()).authenticate(values, bearer)
+        except BearerError as err:
+            return _bearer_response(err)
+        request.seamless_bearer = user  # type: ignore[attr-defined]
+        return None
+
+    if view is None:
+        return lambda inner: _wrap(inner, check, blocking=True)
+    return _wrap(view, check, blocking=True)
+
+
+def require_scope(*scopes: str) -> Callable[[F], F]:
+    """Under :func:`require_bearer`: every listed scope must be granted, else 403
+    ``insufficient_scope``."""
+    return _guarded(_scope_guard(*scopes))
+
+
+def require_role(*roles: str) -> Callable[[F], F]:
+    """Under :func:`require_bearer`: any one listed role must be granted, else 403
+    ``insufficient_role``."""
+    return _guarded(_role_guard(*roles))
+
+
+def require_step_up(
+    *,
+    acr_values: list[str] | tuple[str, ...] | None = None,
+    max_age: int | None = None,
+    amr: list[str] | tuple[str, ...] | None = None,
+) -> Callable[[F], F]:
+    """Under :func:`require_bearer`: the RFC 9470 step-up check, else 401
+    ``insufficient_user_authentication`` with the challenge."""
+    return _guarded(_step_up_guard(acr_values=acr_values, max_age=max_age, amr=amr))
+
+
+def bearer_user_of(request: HttpRequest) -> VerifiedUser:
+    """The user :func:`require_bearer` put on the request."""
+    return cast(VerifiedUser, request.seamless_bearer)  # type: ignore[attr-defined]
+
+
+def _guarded(guard: Guard) -> Callable[[F], F]:
+    def check(request: HttpRequest) -> HttpResponse | None:
+        user = getattr(request, "seamless_bearer", None)
+        try:
+            if not isinstance(user, VerifiedUser):
+                raise missing_token()
+            guard.check(user)
+        except BearerError as err:
+            return _bearer_response(err)
+        return None
+
+    return lambda view: _wrap(view, check, blocking=False)
+
+
+def _wrap(view: F, check: Callable[[HttpRequest], HttpResponse | None], *, blocking: bool) -> F:
+    if inspect.iscoroutinefunction(view):
+
+        @functools.wraps(view)
+        async def async_wrapper(request: HttpRequest, *args: Any, **kwargs: Any) -> Any:
+            refused = await sync_to_async(check)(request) if blocking else check(request)
+            return refused or await view(request, *args, **kwargs)
+
+        return cast(F, async_wrapper)
+
+    @functools.wraps(view)
+    def wrapper(request: HttpRequest, *args: Any, **kwargs: Any) -> Any:
+        return check(request) or view(request, *args, **kwargs)
+
+    return cast(F, wrapper)
+
+
+def _bearer_response(err: BearerError) -> JsonResponse:
+    response = JsonResponse(err.body, status=err.status)
+    if err.www_authenticate:
+        response["WWW-Authenticate"] = err.www_authenticate
+    return response
 
 
 def user_of(request: HttpRequest) -> User:

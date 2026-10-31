@@ -265,7 +265,7 @@ class Adapter:
         self._deliver = _sync_deliver(deliver) if deliver is not None else None
         self._delivered_kinds = MESSAGE_KINDS | (NOTICE_KINDS if deliver_account_notices else set())
         self._resolve_client_ip = resolve_client_ip
-        self._jwks = JwksCache(url, self._client)
+        self._jwks = JwksCache(f"{url}/.well-known/jwks.json", self._client)
         self._manifest = ManifestSource(url, self._client, not disable_manifest_fetch)
         self._refreshes = Refresher()
         self._proxy_token: tuple[str, float] | None = None
