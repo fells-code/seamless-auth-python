@@ -16,6 +16,10 @@
     def me(user: User = Depends(current_user)):
         return {"id": user.id}
 
+    @app.get("/api/admin")
+    def admin(user: User = Depends(RequireUser(auth, roles=["admin"]))):
+        return {"id": user.id}
+
 Verify-only, for an API that only receives OpenID Provider access tokens::
 
     from seamless_auth import ResourceServer, VerifiedUser, require_scope
@@ -32,6 +36,7 @@ Verify-only, for an API that only receives OpenID Provider access tokens::
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from urllib.parse import quote
 
 from fastapi import APIRouter, FastAPI, HTTPException, Request
@@ -44,14 +49,17 @@ from ._adapter import (
     Adapter,
     CrossSiteRequest,
     EnrollmentRequired,
+    InsufficientRole,
     Unauthenticated,
     User,
+    required_roles,
 )
 from ._http import AuthRequest, AuthResponse, Headers
 from ._resource_server import BearerError, BearerRequest, Guard, ResourceServer, VerifiedUser
 
 __all__ = [
     "BearerHTTPException",
+    "OptionalUser",
     "RequireBearer",
     "RequireUser",
     "add_bearer_error_handler",
@@ -101,27 +109,53 @@ class RequireUser:
 
     A recovery session (a user who still has to enroll a new passkey or
     authenticator app) answers 403 ``enrollment_required`` unless
-    ``allow_recovery`` is set.
+    ``allow_recovery`` is set. With ``roles``, a session granted none of them (by
+    :func:`~seamless_auth.role_grants_access`) answers 403 ``insufficient_role``.
 
     A plain function, so FastAPI runs it on its threadpool: the first sight of a key
     may fetch the auth API's key set.
     """
 
-    def __init__(self, adapter: Adapter, *, allow_recovery: bool = False) -> None:
+    def __init__(
+        self,
+        adapter: Adapter,
+        *,
+        allow_recovery: bool = False,
+        roles: Iterable[str] | None = None,
+    ) -> None:
         self._adapter = adapter
         self._allow_recovery = allow_recovery
+        self._roles = required_roles(roles)
 
     def __call__(self, request: Request) -> User:
         try:
             return self._adapter.authenticate_request(
-                request.method, _headers(request), allow_recovery=self._allow_recovery
+                request.method,
+                _headers(request),
+                allow_recovery=self._allow_recovery,
+                roles=self._roles,
             )
+        except InsufficientRole:
+            raise HTTPException(status_code=403, detail="insufficient_role") from None
         except EnrollmentRequired:
             raise HTTPException(status_code=403, detail="enrollment_required") from None
         except CrossSiteRequest:
             raise HTTPException(status_code=403, detail="cross_site_request_blocked") from None
         except Unauthenticated:
             raise HTTPException(status_code=401, detail="unauthenticated") from None
+
+
+class OptionalUser:
+    """A dependency that returns the :class:`~seamless_auth.User` exactly when
+    :class:`RequireUser` with its defaults would, and ``None`` otherwise (no session,
+    a recovery session, or a cross-site state change). It never answers an error.
+    """
+
+    def __init__(self, adapter: Adapter) -> None:
+        self._adapter = adapter
+
+    def __call__(self, request: Request) -> User | None:
+        return self._adapter.optional_user(request.method, _headers(request))
 
 
 class BearerHTTPException(HTTPException):

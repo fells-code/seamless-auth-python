@@ -17,7 +17,14 @@ from conftest import (
 )
 from cryptography.hazmat.primitives.asymmetric import rsa
 
-from seamless_auth import CrossSiteRequest, Unauthenticated
+from seamless_auth import (
+    CrossSiteRequest,
+    EnrollmentRequired,
+    InsufficientRole,
+    Unauthenticated,
+    User,
+    has_any_role,
+)
 
 
 def bearer(token: str) -> tuple[str, str]:
@@ -359,3 +366,90 @@ def test_the_guard_applies_the_allowlist_to_same_site_requests(api: FakeApi) -> 
         adapter.authenticate_request("POST", [bearer(ACCESS), ("sec-fetch-site", "same-site")]).id
         == "u1"
     )
+
+
+ROLE_CASES = [
+    # (granted, required, ok)
+    (["admin"], ["admin"], True),
+    (["user"], ["admin"], False),
+    (["user"], ["admin", "user"], True),
+    ([], ["admin"], False),
+    (["org:*"], ["org:billing"], True),
+    (["org"], ["org:billing"], True),
+    (["projects:write"], ["projects:read"], True),
+    (["projects:read"], ["projects:write"], False),
+    (["org:billing"], ["org"], False),
+]
+
+
+@pytest.mark.parametrize("case", ROLE_CASES)
+def test_a_role_guard_admits_any_granted_role(
+    api: FakeApi, case: tuple[list[str], list[str], bool]
+) -> None:
+    granted, required, ok = case
+    adapter = api.adapter()
+    token = api_token("u1", "access", roles=granted)
+    for headers in ([bearer(token)], [session_cookie(token)]):
+        if ok:
+            assert adapter.authenticate_request("GET", headers, roles=required).id == "u1"
+            assert adapter.authenticate(headers, roles=required).id == "u1"
+        else:
+            with pytest.raises(InsufficientRole):
+                adapter.authenticate_request("GET", headers, roles=required)
+            with pytest.raises(InsufficientRole):
+                adapter.authenticate(headers, roles=required)
+    assert has_any_role(User(id="u1", roles=tuple(granted)), required) is ok
+
+
+def test_a_role_guard_takes_roles_from_the_verified_token_not_the_cookie(api: FakeApi) -> None:
+    token = api_token("u1", "access", roles=["user"])
+    with pytest.raises(InsufficientRole):
+        api.adapter().authenticate_request(
+            "GET", [session_cookie(token, roles=["admin"])], roles=["admin"]
+        )
+
+
+def test_a_role_guard_checks_the_session_and_origin_first(api: FakeApi) -> None:
+    adapter = api.adapter()
+    with pytest.raises(Unauthenticated):
+        adapter.authenticate_request("GET", [], roles=["admin"])
+    with pytest.raises(EnrollmentRequired):
+        adapter.authenticate_request(
+            "GET", [bearer(api_token("u1", "access", recovery=True))], roles=["admin"]
+        )
+    with pytest.raises(CrossSiteRequest):
+        adapter.authenticate_request(
+            "POST",
+            [session_cookie(ACCESS), ("sec-fetch-site", "cross-site")],
+            roles=["admin"],
+        )
+
+
+@pytest.mark.parametrize("roles", [[], (), [""], "admin"])
+def test_a_role_guard_refuses_unusable_roles(api: FakeApi, roles: Any) -> None:
+    with pytest.raises((ValueError, TypeError)):
+        api.adapter().authenticate_request("GET", [bearer(ACCESS)], roles=roles)
+
+
+def test_the_organization_comes_from_the_verified_token(api: FakeApi) -> None:
+    adapter = api.adapter()
+    token = api_token("u1", "access", org_id="org-1")
+    assert adapter.authenticate([bearer(token)]).organization_id == "org-1"
+    cookie_user = adapter.authenticate([session_cookie(token, organizationId="org-forged")])
+    assert cookie_user.organization_id == "org-1"
+    unscoped = adapter.authenticate([session_cookie(ACCESS, organizationId="org-forged")])
+    assert unscoped.organization_id is None
+    assert (
+        adapter.authenticate([bearer(api_token("u1", "access", org_id=7))]).organization_id is None
+    )
+
+
+def test_the_optional_user(api: FakeApi) -> None:
+    adapter = api.adapter()
+    assert adapter.optional_user("GET", []) is None
+    assert adapter.optional_user("GET", [bearer(ACCESS)]) == adapter.authenticate([bearer(ACCESS)])
+    assert adapter.optional_user("GET", [bearer(api_token("u1", "ephemeral"))]) is None
+    assert adapter.optional_user("GET", [bearer(api_token("u1", "access", recovery=True))]) is None
+    cross_site = [session_cookie(ACCESS), ("sec-fetch-site", "cross-site")]
+    assert adapter.optional_user("POST", cross_site) is None
+    assert adapter.optional_user("GET", cross_site) is not None

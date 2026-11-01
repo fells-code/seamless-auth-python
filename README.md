@@ -63,7 +63,24 @@ The auth server reads the service token from `API_SERVICE_TOKEN` and your app re
 
 `RequireUser` answers 401 unless the request carries a session, and returns the `User`. It
 answers 403 for a recovery session (see [Recovery sessions](#recovery-sessions)) unless you pass
-`RequireUser(auth, allow_recovery=True)`.
+`RequireUser(auth, allow_recovery=True)`. `RequireUser(auth, roles=["admin"])` also requires a role
+(see [Roles](#roles)).
+
+`OptionalUser(auth)` is for routes that serve signed-in and anonymous visitors alike. It returns
+the `User` exactly when `RequireUser(auth)` would admit the request, and `None` otherwise (no
+session, a recovery session, or a cross-site state change on the cookie). It never answers an
+error.
+
+```python
+from seamless_auth.fastapi import OptionalUser
+
+maybe_user = OptionalUser(auth)
+
+
+@app.get("/")
+def home(user: User | None = Depends(maybe_user)):
+    return {"signed_in": user is not None}
+```
 
 ## Django
 
@@ -93,7 +110,9 @@ def me(request):
 ```
 
 `@require_auth(allow_recovery=True)` admits a recovery session too (see
-[Recovery sessions](#recovery-sessions)).
+[Recovery sessions](#recovery-sessions)), and `@require_auth(roles=["admin"])` also requires a role
+(see [Roles](#roles)). `user_of(request)` reads the `User` the guard put on the request; call it
+only under `require_auth`, as it raises `AttributeError` on an unguarded request.
 
 `SEAMLESS_AUTH` takes the keyword arguments of `Adapter` (below). `deliver` and
 `resolve_client_ip` may be dotted paths to callables. `require_auth` works on sync and async
@@ -127,6 +146,35 @@ while cookies are `SameSite=None` and only for methods other than `GET`, `HEAD` 
   other `Origin` must be on it. A request with neither header passes.
 
 A bearer token is never attached by a browser, so it is not checked.
+
+`User.organization_id` is the active organization, from the `org_id` claim of the verified access
+token, or `None` when the session has none. Like `User.roles`, it never comes from the cookie.
+
+### Roles
+
+`roles` on the guard (`RequireUser(auth, roles=[...])`, `@require_auth(roles=[...])`) admits a
+session when any one of the user's roles grants any one listed role, by `role_grants_access` (the
+port of `roleGrantsAccess` in `@seamless-auth/types`): `org:*` grants `org` and `org:billing`, an
+unscoped `org` grants `org:billing`, and `projects:write` grants `projects:read`. The roles come
+from the verified access token. A session granted none answers 403
+`{ "error": "insufficient_role" }` (FastAPI: `{ "detail": "insufficient_role" }`), after the
+session, recovery and cross-site checks, and the body never names the roles. An empty `roles`
+list raises `ValueError` when the guard is built.
+
+```python
+@app.get("/api/admin")
+def admin(user: User = Depends(RequireUser(auth, roles=["admin"]))):
+    return {"id": user.id}
+```
+
+```python
+@require_auth(roles=["admin", "billing:write"])
+def billing(request):
+    return JsonResponse({"org": user_of(request).organization_id})
+```
+
+`Adapter.authenticate_request(method, headers, roles=[...])` and `Adapter.authenticate(headers,
+roles=[...])` raise `InsufficientRole`; `has_any_role(user, roles)` is the check on its own.
 
 ### Recovery sessions
 
