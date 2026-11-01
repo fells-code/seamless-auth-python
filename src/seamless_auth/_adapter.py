@@ -35,6 +35,7 @@ from ._jwks import BodyTooLarge, JwksCache, TokenError, read_limited
 from ._jwt import Claims, sign_hs256, str_claim, unverified_claims
 from ._manifest import ManifestRoute, ManifestSource, RouteMatch
 from ._refresh import Refresher, RefreshOutcome
+from ._resource_server import as_names, role_grants_access
 
 if TYPE_CHECKING:
     from ._console import Console
@@ -96,6 +97,8 @@ class User:
     #: A recovery session: signed in with a recovery code or self-service recovery,
     #: and not yet enrolled in a new passkey or authenticator app.
     recovery: bool = False
+    #: The active organization, from the verified access token's ``org_id`` claim.
+    organization_id: str | None = None
     #: The auth API access token, for calling the API on the user's behalf.
     token: str = field(default="", repr=False)
 
@@ -111,6 +114,23 @@ class EnrollmentRequired(Unauthenticated):
 
 class CrossSiteRequest(Exception):
     """A state-changing request from another site, carrying a session cookie."""
+
+
+class InsufficientRole(Exception):
+    """A session granted none of the roles a guard requires. Answer it 403
+    ``insufficient_role``, without naming the roles."""
+
+
+def required_roles(roles: Iterable[str] | None) -> tuple[str, ...] | None:
+    """Validates a guard's ``roles`` at setup: ``None`` means no role check, and an
+    empty list is refused because it could only ever deny or be a mistake."""
+    return None if roles is None else as_names("roles", roles)
+
+
+def has_any_role(user: User, roles: Iterable[str]) -> bool:
+    """Whether any of the user's roles grants any listed role, by
+    :func:`~seamless_auth.role_grants_access`."""
+    return any(role_grants_access(g, r) for r in roles for g in user.roles)
 
 
 @dataclass
@@ -306,11 +326,14 @@ class Adapter:
             return _json_response(500, {"error": "internal_error"})
 
     def _handle(self, request: AuthRequest) -> AuthResponse:
-        blocked = self._check_origin(request.method, request.headers)
-        if blocked is not None:
-            return self._write(blocked, bearer=False)
-
         bearer = (request.headers.get(TRANSPORT_HEADER) or "").lower() == "bearer"
+        # Bearer transport reads no cookies, so a cross-site request has nothing of the
+        # user's to ride on. A custom header also needs a CORS preflight to be sent.
+        if not bearer:
+            blocked = self._check_origin(request.method, request.headers)
+            if blocked is not None:
+                return self._write(blocked, bearer=False)
+
         forwarded = self._forwarded(request)
         method = request.method.upper()
         # Matched on segments, as manifest routes are, so /logout/ and //logout are
@@ -832,7 +855,11 @@ class Adapter:
     # The guard.
 
     def authenticate(
-        self, headers: Headers | Iterable[tuple[str, str]], *, allow_recovery: bool = False
+        self,
+        headers: Headers | Iterable[tuple[str, str]],
+        *,
+        allow_recovery: bool = False,
+        roles: Iterable[str] | None = None,
     ) -> User:
         """Verifies a request's session: the adapter's access cookie, or an auth API
         access token in ``Authorization: Bearer`` for clients with no cookie jar.
@@ -840,8 +867,12 @@ class Adapter:
         to the auth routes, and a bearer client refreshes through
         ``POST /auth/refresh`` itself. Raises :class:`Unauthenticated`, or its
         subclass :class:`EnrollmentRequired` for a recovery session unless
-        ``allow_recovery`` is set."""
-        return self._authenticate(_as_headers(headers), allow_recovery)[0]
+        ``allow_recovery`` is set. With ``roles``, raises :class:`InsufficientRole`
+        unless the session is granted any one of them."""
+        required = required_roles(roles)
+        user = self._authenticate(_as_headers(headers), allow_recovery)[0]
+        _check_roles(user, required)
+        return user
 
     def authenticate_request(
         self,
@@ -849,15 +880,28 @@ class Adapter:
         headers: Headers | Iterable[tuple[str, str]],
         *,
         allow_recovery: bool = False,
+        roles: Iterable[str] | None = None,
     ) -> User:
         """:meth:`authenticate` for a guarded route. A session from the cookie also
         gets the auth routes' cross-site check, or a form on another site could act
         as the user: raises :class:`CrossSiteRequest` for one."""
+        required = required_roles(roles)
         headers = _as_headers(headers)
         user, by_cookie = self._authenticate(headers, allow_recovery)
         if by_cookie and self._check_origin(method, headers) is not None:
             raise CrossSiteRequest
+        _check_roles(user, required)
         return user
+
+    def optional_user(
+        self, method: str, headers: Headers | Iterable[tuple[str, str]]
+    ) -> User | None:
+        """The user exactly when :meth:`authenticate_request` with its defaults would
+        return one, otherwise ``None``. A recovery session yields ``None``."""
+        try:
+            return self.authenticate_request(method, headers)
+        except (Unauthenticated, CrossSiteRequest):
+            return None
 
     def _authenticate(self, headers: Headers, allow_recovery: bool) -> tuple[User, bool]:
         user, by_cookie = self._session_of(headers)
@@ -885,6 +929,7 @@ class Adapter:
                     email=str_claim(cookie, "email") or None,
                     phone=str_claim(cookie, "phone") or None,
                     recovery=claims.get("recovery") is True,
+                    organization_id=str_claim(claims, "org_id") or None,
                     token=token,
                 ),
                 True,
@@ -950,6 +995,11 @@ class Adapter:
 
 
 _NO_REFRESH_COOKIE = "no refresh cookie"
+
+
+def _check_roles(user: User, required: tuple[str, ...] | None) -> None:
+    if required is not None and not has_any_role(user, required):
+        raise InsufficientRole
 
 
 def _as_headers(headers: Headers | Iterable[tuple[str, str]]) -> Headers:
@@ -1078,6 +1128,7 @@ def _user_from(claims: Claims, token: str, recovery: bool) -> User:
         email=str_claim(claims, "email") or None,
         phone=str_claim(claims, "phone") or None,
         recovery=recovery,
+        organization_id=str_claim(claims, "org_id") or None,
         token=token,
     )
 

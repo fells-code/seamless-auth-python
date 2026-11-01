@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import httpx2
+import pytest
 from conftest import (
     API_URL,
     FakeApi,
@@ -16,7 +17,7 @@ from fastapi import Depends, FastAPI
 from fastapi.testclient import TestClient
 
 from seamless_auth import Adapter, Delivery, User
-from seamless_auth.fastapi import RequireUser, auth_router
+from seamless_auth.fastapi import OptionalUser, RequireUser, auth_router
 
 
 def app_for(adapter: Adapter) -> TestClient:
@@ -37,6 +38,18 @@ def app_for(adapter: Adapter) -> TestClient:
     @app.post("/api/transfer")
     def transfer(user: User = Depends(current_user)) -> dict[str, str]:  # noqa: B008
         return {"id": user.id}
+
+    @app.api_route("/api/admin", methods=["GET", "POST"])
+    def admin(
+        user: User = Depends(RequireUser(adapter, roles=["admin", "billing:write"])),  # noqa: B008
+    ) -> dict[str, str]:
+        return {"id": user.id}
+
+    @app.api_route("/api/maybe", methods=["GET", "POST"])
+    def maybe(
+        user: User | None = Depends(OptionalUser(adapter)),  # noqa: B008
+    ) -> dict[str, object]:
+        return {"user": None if user is None else {"id": user.id, "org": user.organization_id}}
 
     return TestClient(app, base_url="https://testserver")
 
@@ -177,3 +190,56 @@ def test_an_async_deliver_runs_on_the_app_loop(api: FakeApi) -> None:
     assert r.json() == {"message": "sent"}
     assert got[0].to == "a@b.test"
     assert API_URL
+
+
+def bearer_header(**claims: object) -> dict[str, str]:
+    return {"authorization": f"Bearer {api_token('u1', 'access', **claims)}"}
+
+
+def test_the_role_guard(api: FakeApi) -> None:
+    client = app_for(api.adapter())
+
+    r = client.get("/api/admin")
+    assert (r.status_code, r.json()) == (401, {"detail": "unauthenticated"})
+    r = client.get("/api/admin", headers=bearer_header(roles=["user"]))
+    assert (r.status_code, r.json()) == (403, {"detail": "insufficient_role"})
+    r = client.get(
+        "/api/admin", headers=bearer_header(roles=["admin", "secret-role"], recovery=True)
+    )
+    assert (r.status_code, r.json()) == (403, {"detail": "enrollment_required"})
+    for roles in (["admin"], ["billing:*"], ["billing"]):
+        r = client.get("/api/admin", headers=bearer_header(roles=roles))
+        assert (r.status_code, r.json()) == (200, {"id": "u1"}), roles
+
+    cookie = signed_cookie(
+        "seamless-access", {"sub": "u1", "token": api_token("u1", "access"), "roles": ["admin"]}
+    )
+    r = client.get("/api/admin", headers={"cookie": cookie})
+    assert (r.status_code, r.json()) == (403, {"detail": "insufficient_role"})
+    admin_cookie = signed_cookie(
+        "seamless-access", {"sub": "u1", "token": api_token("u1", "access", roles=["admin"])}
+    )
+    r = client.post("/api/admin", headers={"cookie": admin_cookie, "sec-fetch-site": "cross-site"})
+    assert (r.status_code, r.json()) == (403, {"detail": "cross_site_request_blocked"})
+
+
+def test_the_role_guard_refuses_no_roles_at_setup(api: FakeApi) -> None:
+    with pytest.raises(ValueError, match="at least one"):
+        RequireUser(api.adapter(), roles=[])
+    with pytest.raises(TypeError):
+        RequireUser(api.adapter(), roles="admin")
+
+
+def test_the_optional_user(api: FakeApi) -> None:
+    client = app_for(api.adapter())
+
+    assert client.get("/api/maybe").json() == {"user": None}
+    r = client.get("/api/maybe", headers=bearer_header(org_id="org-1"))
+    assert (r.status_code, r.json()) == (200, {"user": {"id": "u1", "org": "org-1"}})
+    r = client.get("/api/maybe", headers=bearer_header(recovery=True))
+    assert (r.status_code, r.json()) == (200, {"user": None})
+    cookie = signed_cookie("seamless-access", {"sub": "u1", "token": api_token("u1", "access")})
+    r = client.post("/api/maybe", headers={"cookie": cookie, "sec-fetch-site": "cross-site"})
+    assert (r.status_code, r.json()) == (200, {"user": None})
+    forged = signed_cookie("seamless-access", {"sub": "u1", "token": hs256_access_token()})
+    assert client.get("/api/maybe", headers={"cookie": forged}).json() == {"user": None}

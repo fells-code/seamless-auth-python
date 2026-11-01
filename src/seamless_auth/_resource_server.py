@@ -453,6 +453,13 @@ def role_grants_access(granted_role: str, required_role: str) -> bool:
     )
 
 
+def as_names(what: str, values: Iterable[str]) -> tuple[str, ...]:
+    """``values`` as a non-empty tuple of non-empty strings, or a setup error."""
+    names = _as_tuple(values)
+    _check_names(what, names)
+    return names
+
+
 def _as_tuple(values: Iterable[str]) -> tuple[str, ...]:
     if isinstance(values, str):
         raise TypeError("seamless-auth: pass a list of values, not a string")

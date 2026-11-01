@@ -14,11 +14,15 @@ Configure the adapter in settings, include its URLs, and guard views::
     urlpatterns = [path("auth/", include("seamless_auth.django"))]
 
     # views.py
-    from seamless_auth.django import require_auth
+    from seamless_auth.django import require_auth, user_of
 
     @require_auth
     def me(request):
         return JsonResponse({"id": request.seamless_user.id})
+
+    @require_auth(roles=["admin"])
+    def admin(request):
+        return JsonResponse({"id": user_of(request).id})
 
 ``SEAMLESS_AUTH`` takes the keyword arguments of :class:`seamless_auth.Adapter`.
 ``deliver`` and ``resolve_client_ip`` may be dotted paths to callables.
@@ -48,7 +52,7 @@ from __future__ import annotations
 import functools
 import inspect
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from typing import Any, Literal, TypeVar, cast, overload
 from urllib.parse import quote, unquote
 
@@ -65,8 +69,10 @@ from ._adapter import (
     Adapter,
     CrossSiteRequest,
     EnrollmentRequired,
+    InsufficientRole,
     Unauthenticated,
     User,
+    required_roles,
 )
 from ._http import AuthRequest, AuthResponse, Headers
 from ._resource_server import (
@@ -94,6 +100,7 @@ __all__ = [
     "require_scope",
     "require_step_up",
     "urlpatterns",
+    "user_of",
 ]
 
 _PATH_SAFE = "/:@!$&'()*+,;=-._~"
@@ -182,27 +189,42 @@ console_urlpatterns = [re_path(r"^(?P<path>.*)$", console_view, name="seamless-c
 @overload
 def require_auth(view: F) -> F: ...
 @overload
-def require_auth(*, allow_recovery: bool = False) -> Callable[[F], F]: ...
+def require_auth(
+    *, allow_recovery: bool = False, roles: Iterable[str] | None = None
+) -> Callable[[F], F]: ...
 
 
-def require_auth(view: F | None = None, *, allow_recovery: bool = False) -> Any:
+def require_auth(
+    view: F | None = None,
+    *,
+    allow_recovery: bool = False,
+    roles: Iterable[str] | None = None,
+) -> Any:
     """Answers 401 unless the request carries a valid session, and puts the
     :class:`~seamless_auth.User` on ``request.seamless_user``. A session from the
     cookie also gets the auth routes' cross-site check (403 on a state change from
     another site). A recovery session (a user who still has to enroll a new passkey
     or authenticator app) answers 403 ``enrollment_required`` unless
-    ``@require_auth(allow_recovery=True)``. Works on sync and async views."""
+    ``@require_auth(allow_recovery=True)``. With ``roles``, a session granted none
+    of them (by :func:`~seamless_auth.role_grants_access`) answers 403
+    ``insufficient_role``. Works on sync and async views."""
+    required = required_roles(roles)
     if view is None:
-        return lambda inner: _guard(inner, allow_recovery)
-    return _guard(view, allow_recovery)
+        return lambda inner: _guard(inner, allow_recovery, required)
+    return _guard(view, allow_recovery, required)
 
 
-def _guard(view: F, allow_recovery: bool) -> F:
+def _guard(view: F, allow_recovery: bool, roles: tuple[str, ...] | None) -> F:
     def check(request: HttpRequest) -> HttpResponse | None:
         try:
             user = get_adapter().authenticate_request(
-                request.method or "GET", _headers(request), allow_recovery=allow_recovery
+                request.method or "GET",
+                _headers(request),
+                allow_recovery=allow_recovery,
+                roles=roles,
             )
+        except InsufficientRole:
+            return JsonResponse({"error": "insufficient_role"}, status=403)
         except EnrollmentRequired:
             return JsonResponse({"error": "enrollment_required"}, status=403)
         except CrossSiteRequest:
@@ -326,7 +348,9 @@ def _bearer_response(err: BearerError) -> JsonResponse:
 
 
 def user_of(request: HttpRequest) -> User:
-    """The user :func:`require_auth` put on the request."""
+    """The user :func:`require_auth` put on the request. Call it only under that
+    guard: it is not an optional-user lookup and raises ``AttributeError`` on an
+    unguarded request."""
     return cast(User, request.seamless_user)  # type: ignore[attr-defined]
 
 

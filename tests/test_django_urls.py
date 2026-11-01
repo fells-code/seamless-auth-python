@@ -33,12 +33,25 @@ def transfer(request: HttpRequest) -> JsonResponse:
     return JsonResponse({"id": user_of(request).id})
 
 
+@csrf_exempt
+@require_auth(roles=["admin", "billing:write"])
+def admin(request: HttpRequest) -> JsonResponse:
+    return JsonResponse({"id": user_of(request).id, "org": user_of(request).organization_id})
+
+
+@require_auth(roles=["admin"])
+async def admin_async(request: HttpRequest) -> JsonResponse:
+    return JsonResponse({"id": user_of(request).id})
+
+
 urlpatterns = [
     path("api/me", me),
     path("api/me-async", me_async),
     path("api/enroll", enroll),
     path("api/enroll-async", enroll_async),
     path("api/transfer", transfer),
+    path("api/admin", admin),
+    path("api/admin-async", admin_async),
     path("auth/", include("seamless_auth.django")),
     path("console/", include(console_urlpatterns)),
 ]

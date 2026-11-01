@@ -531,6 +531,22 @@ def test_cross_site_state_changes_are_blocked(api: FakeApi) -> None:
     assert r.status == 400
 
 
+def test_bearer_transport_skips_the_origin_check(api: FakeApi) -> None:
+    api.on("POST", "/login", respond(400, {"error": "invalid_request"}))
+    adapter = api.adapter(allowed_origins=["https://app.example"])
+    for headers in ({"sec-fetch-site": "cross-site"}, {"origin": "null"}):
+        r = call(
+            adapter,
+            "POST",
+            "/login",
+            body="{}",
+            headers={"x-seamless-auth-transport": "bearer", **headers},
+        )
+        assert r.status == 400, r.text
+        r = call(adapter, "POST", "/login", body="{}", headers=headers)
+        assert (r.status, r.body) == (403, {"error": "cross_site_request_blocked"})
+
+
 APP = "https://app.example"
 ORIGIN_CASES = [
     # (allowlist, same_site, method, sec-fetch-site, origin, blocked)

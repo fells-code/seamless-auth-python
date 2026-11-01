@@ -224,3 +224,56 @@ def test_the_django_console(api: FakeApi, client: Client) -> None:
     assert b"".join(r.streaming_content) == b"js"  # type: ignore[attr-defined]
     assert client.get("/console/%2e%2e/jwks.json").status_code == 400
     assert client.post("/console/x").status_code == 405
+
+
+def bearer_auth(**claims: Any) -> str:
+    return f"Bearer {api_token('u1', 'access', **claims)}"
+
+
+def test_the_role_guard(client: Client) -> None:
+    for view in ("/api/admin", "/api/admin-async"):
+        r = client.get(view)
+        assert (r.status_code, r.json()) == (401, {"error": "unauthenticated"}), view
+        r = client.get(view, HTTP_AUTHORIZATION=bearer_auth(roles=["user"]))
+        assert (r.status_code, r.json()) == (403, {"error": "insufficient_role"}), view
+        r = client.get(view, HTTP_AUTHORIZATION=bearer_auth(roles=["admin"], recovery=True))
+        assert (r.status_code, r.json()) == (403, {"error": "enrollment_required"}), view
+        r = client.get(view, HTTP_AUTHORIZATION=bearer_auth(roles=["admin"]))
+        assert r.status_code == 200, view
+
+    for roles in (["billing:*"], ["billing"]):
+        r = client.get("/api/admin", HTTP_AUTHORIZATION=bearer_auth(roles=roles, org_id="org-1"))
+        assert (r.status_code, r.json()) == (200, {"id": "u1", "org": "org-1"}), roles
+
+    forged_roles = signed_cookie(
+        "seamless-access", {"sub": "u1", "token": api_token("u1", "access"), "roles": ["admin"]}
+    )
+    r = client.get("/api/admin", HTTP_COOKIE=forged_roles)
+    assert (r.status_code, r.json()) == (403, {"error": "insufficient_role"})
+    admin_cookie = signed_cookie(
+        "seamless-access",
+        {
+            "sub": "u1",
+            "token": api_token("u1", "access", roles=["admin"]),
+            "organizationId": "org-forged",
+        },
+    )
+    r = client.post("/api/admin", HTTP_COOKIE=admin_cookie, HTTP_SEC_FETCH_SITE="cross-site")
+    assert (r.status_code, r.json()) == (403, {"error": "cross_site_request_blocked"})
+    r = client.get("/api/admin", HTTP_COOKIE=admin_cookie)
+    assert (r.status_code, r.json()) == (200, {"id": "u1", "org": None})
+
+
+def test_the_role_guard_refuses_no_roles_at_setup() -> None:
+    from seamless_auth.django import require_auth
+
+    with pytest.raises(ValueError, match="at least one"):
+        require_auth(roles=[])
+    with pytest.raises(TypeError):
+        require_auth(roles="admin")
+
+
+def test_user_of_is_exported() -> None:
+    import seamless_auth.django as binding
+
+    assert "user_of" in binding.__all__

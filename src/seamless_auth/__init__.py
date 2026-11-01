@@ -13,7 +13,15 @@ The framework bindings live in :mod:`seamless_auth.fastapi` and
 :mod:`seamless_auth.django`.
 """
 
-from ._adapter import Adapter, CrossSiteRequest, EnrollmentRequired, Unauthenticated, User
+from ._adapter import (
+    Adapter,
+    CrossSiteRequest,
+    EnrollmentRequired,
+    InsufficientRole,
+    Unauthenticated,
+    User,
+    has_any_role,
+)
 from ._client_ip import TrustedProxies
 from ._delivery import Delivery
 from ._http import AuthRequest, AuthResponse, Headers, ResponseCookie
@@ -44,6 +52,7 @@ __all__ = [
     "EnrollmentRequired",
     "Guard",
     "Headers",
+    "InsufficientRole",
     "Manifest",
     "ManifestError",
     "ManifestRoute",
@@ -53,6 +62,7 @@ __all__ = [
     "Unauthenticated",
     "User",
     "VerifiedUser",
+    "has_any_role",
     "require_role",
     "require_scope",
     "require_step_up",
