@@ -326,11 +326,14 @@ class Adapter:
             return _json_response(500, {"error": "internal_error"})
 
     def _handle(self, request: AuthRequest) -> AuthResponse:
-        blocked = self._check_origin(request.method, request.headers)
-        if blocked is not None:
-            return self._write(blocked, bearer=False)
-
         bearer = (request.headers.get(TRANSPORT_HEADER) or "").lower() == "bearer"
+        # Bearer transport reads no cookies, so a cross-site request has nothing of the
+        # user's to ride on. A custom header also needs a CORS preflight to be sent.
+        if not bearer:
+            blocked = self._check_origin(request.method, request.headers)
+            if blocked is not None:
+                return self._write(blocked, bearer=False)
+
         forwarded = self._forwarded(request)
         method = request.method.upper()
         # Matched on segments, as manifest routes are, so /logout/ and //logout are

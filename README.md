@@ -145,7 +145,9 @@ while cookies are `SameSite=None` and only for methods other than `GET`, `HEAD` 
 - With no `Sec-Fetch-Site`, an `Origin: null` answers 403, and when `allowed_origins` is set any
   other `Origin` must be on it. A request with neither header passes.
 
-A bearer token is never attached by a browser, so it is not checked.
+A bearer token is never attached by a browser, so it is not checked. For the same reason the auth
+routes skip the check on a bearer-transport request (`x-seamless-auth-transport: bearer`), which
+reads no cookies.
 
 `User.organization_id` is the active organization, from the `org_id` claim of the verified access
 token, or `None` when the session has none. Like `User.roles`, it never comes from the cookie.
