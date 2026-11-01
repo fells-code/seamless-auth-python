@@ -55,6 +55,7 @@ Tooling is [uv](https://docs.astral.sh/uv/). Development runs on Python 3.11, th
 | Types | `uv run mypy` (strict) |
 | Tests | `uv run pytest` |
 | Conformance | see README, "Conformance" (both reference apps) |
+| Manifest | `scripts/check-manifest.sh` (fix with `scripts/sync-manifest.sh`) |
 
 CI runs the checks on Python 3.11 to 3.14. 3.11 resolves Django 5.2 LTS and later versions the
 current Django, so both are covered. Do not use language or standard library features newer than
@@ -106,5 +107,8 @@ bump the version, edit the changelog, or tag by hand:
   `release-please-config.json`), or `uv sync --locked` fails on main after every release.
 - If a publish fails after the release is tagged, fix the cause on main, then publish that tag by
   hand: `gh workflow run release.yml -f tag=vX.Y.Z`. It checks the tag matches `pyproject.toml`.
+- The bundled manifest must match the one seamless-auth-api main publishes. The `manifest`
+  workflow checks it on every PR, on `main` and daily. Update it with `scripts/sync-manifest.sh`
+  in a `fix:` commit so the new routes ship in a patch release.
 
 Pre-1.0: a breaking change is a minor bump, and 1.0 is a deliberate decision, not a side effect.
