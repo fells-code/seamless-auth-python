@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.5.0](https://github.com/fells-code/seamless-auth-python/compare/v0.4.0...v0.5.0) (2026-11-01)
+
+
+### Added
+
+* first-party role guard, optional user and organization on User ([171babb](https://github.com/fells-code/seamless-auth-python/commit/171babbcaa6cb5544cbf97fd5d30520a581de89b))
+* first-party role guard, optional user and organization on User ([0c97616](https://github.com/fells-code/seamless-auth-python/commit/0c9761609fbfc2ba9483b898614d6bc683db0297)), closes [#28](https://github.com/fells-code/seamless-auth-python/issues/28)
+
+
+### Fixed
+
+* skip the origin check for bearer-transport auth requests ([ea1898d](https://github.com/fells-code/seamless-auth-python/commit/ea1898da7f3f075b342e95150b791efdd4024eb8)), closes [#28](https://github.com/fells-code/seamless-auth-python/issues/28)
+* sync the bundled adapter manifest with API 0.21.1 ([ede9798](https://github.com/fells-code/seamless-auth-python/commit/ede97982542715484853ebeee6fdaf2024b8e196)), closes [#27](https://github.com/fells-code/seamless-auth-python/issues/27)
+* sync the bundled adapter manifest with API 0.21.1 and check it in CI ([08a98d5](https://github.com/fells-code/seamless-auth-python/commit/08a98d5c454beb52986c4669c76320728de0cbbd))
+
 ## [0.4.0](https://github.com/fells-code/seamless-auth-python/compare/v0.3.0...v0.4.0) (2026-11-01)
 
 
