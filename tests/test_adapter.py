@@ -1095,3 +1095,15 @@ def test_a_caller_client_that_follows_redirects_does_not_carry_the_service_token
 
     assert "evil.test" not in hosts
     assert r.status == 307
+
+
+def test_logout_with_an_unreadable_access_cookie_still_ends_the_session(api: FakeApi) -> None:
+    api.on("POST", "/refresh", respond(200, session()))
+    api.on("DELETE", "/logout", respond(200, {"message": "Success"}))
+
+    r = call(api.adapter(), "DELETE", "/logout", cookie=f"{access()}x; {REFRESH}")
+
+    assert len(api.calls_to("DELETE", "/logout")) == 1
+    assert r.status == 204
+    for name in ("seamless-access", "seamless-ephemeral", "seamless-refresh"):
+        assert r.cleared(name), name
