@@ -107,7 +107,7 @@ class Console:
         try:
             for _ in range(MAX_REDIRECTS + 1):
                 request = client.build_request(method, url, timeout=UPSTREAM_TIMEOUT)
-                response = client.send(request, stream=True)
+                response = client.send(request, stream=True, follow_redirects=False)
                 if not response.is_redirect:
                     break
                 follow = response.next_request

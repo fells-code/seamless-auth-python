@@ -368,6 +368,27 @@ def test_the_guard_applies_the_allowlist_to_same_site_requests(api: FakeApi) -> 
     )
 
 
+@pytest.mark.parametrize("same_site", ["Lax", "Strict"])
+def test_the_guard_checks_the_origin_whatever_the_same_site_setting(
+    api: FakeApi, same_site: str
+) -> None:
+    adapter = api.adapter(allowed_origins=["https://app.example"], same_site=same_site)
+    session = session_cookie(ACCESS)
+
+    def post(*headers: tuple[str, str]) -> str:
+        return adapter.authenticate_request("POST", [session, *headers]).id
+
+    with pytest.raises(CrossSiteRequest):
+        post(("sec-fetch-site", "cross-site"))
+    with pytest.raises(CrossSiteRequest):
+        post(("sec-fetch-site", "same-site"), ("origin", "https://evil.app.example"))
+    with pytest.raises(CrossSiteRequest):
+        post(("origin", "https://evil.app.example"))
+    assert post(("sec-fetch-site", "same-site"), ("origin", "https://app.example")) == "u1"
+    # Neither header: not a browser form.
+    assert post() == "u1"
+
+
 ROLE_CASES = [
     # (granted, required, ok)
     (["admin"], ["admin"], True),

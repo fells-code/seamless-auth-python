@@ -151,3 +151,19 @@ def test_the_fastapi_console_router(api: FakeApi) -> None:
     assert client.get("/console/%2e%2e/jwks.json").status_code == 400
     assert client.post("/console/x").status_code == 405
     assert all("cookie" not in c.headers for c in api.calls)
+
+
+def test_a_caller_client_that_follows_redirects_keeps_the_console_inside_itself(
+    api: FakeApi,
+) -> None:
+    api.on(
+        "GET",
+        "/console/escape",
+        lambda _r: httpx2.Response(302, headers={"location": "/.well-known/jwks.json"}),
+    )
+    client = httpx2.Client(transport=httpx2.MockTransport(api.handle), follow_redirects=True)
+
+    r = read(api.adapter(http_client=client).console("GET", "/escape"))
+
+    assert r.status == 502
+    assert not api.calls_to("GET", "/.well-known/jwks.json")

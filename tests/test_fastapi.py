@@ -184,7 +184,7 @@ def test_an_async_deliver_runs_on_the_app_loop(api: FakeApi) -> None:
     client = app_for(api.adapter(deliver=deliver))
     client.cookies.set("seamless-ephemeral", pre_auth().split("=", 1)[1])
 
-    r = client.post("/auth/magic-link")
+    r = client.post("/auth/magic-link", headers={"content-type": "application/json"})
 
     assert r.status_code == 200
     assert r.json() == {"message": "sent"}

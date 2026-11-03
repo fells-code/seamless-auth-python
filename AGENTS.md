@@ -67,8 +67,8 @@ current Django, so both are covered. Do not use language or standard library fea
   routes, credential resolution (with silent refresh), session verification, refresh, logout, the
   guard, the cross-site check.
 - `src/seamless_auth/_console.py`: the admin dashboard proxy (`Adapter.console`).
-- `src/seamless_auth/_refresh.py`: refresh sharing (one result per refresh token for 5 seconds,
-  across threads).
+- `src/seamless_auth/_refresh.py`: refresh sharing across threads (one rotation per refresh token
+  while it runs, and for cookie transport only, its result for 5 seconds after).
 - `src/seamless_auth/_manifest.py`: parsing, matching, the live and bundled manifest.
 - `src/seamless_auth/_cookies.py`, `_jwt.py`, `_jwks.py`: HS256 cookies and service tokens, RS256
   against the API's JWKS.

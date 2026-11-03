@@ -181,7 +181,7 @@ class ResourceServer:
 
     def _discover(self) -> str:
         url = self.issuer.rstrip("/") + DISCOVERY_PATH
-        with self._client.stream("GET", url, timeout=FETCH_TIMEOUT) as res:
+        with self._client.stream("GET", url, timeout=FETCH_TIMEOUT, follow_redirects=False) as res:
             if res.status_code != 200:
                 raise TokenError(f"HTTP {res.status_code}")
             body = read_limited(res, MAX_DISCOVERY_BYTES)
@@ -212,12 +212,7 @@ class ResourceServer:
             raise TokenError("critical header parameters are not supported")
 
         jwk = self._keys().key(kid)
-        if jwk.params.get("kty") != "RSA":
-            raise TokenError("not an RSA key")
-        if "use" in jwk.params and jwk.params["use"] != "sig":
-            raise TokenError("key is not for signatures")
-        if "alg" in jwk.params and jwk.params["alg"] != "RS256":
-            raise TokenError("key is for another algorithm")
+        jwk.check_rs256_signing()
         signing_input = f"{segments[0]}.{segments[1]}".encode("ascii")
         try:
             signed = _RS256.verify(signing_input, jwk.key, _b64decode(segments[2]))

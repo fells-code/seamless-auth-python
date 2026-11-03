@@ -221,19 +221,118 @@ def test_post_refresh_rotates_both_cookies_and_returns_no_tokens(api: FakeApi) -
     assert "seamless-access" in r.cookies and "seamless-refresh" in r.cookies
 
 
-def test_bearer_refresh_is_shared_for_one_refresh_token(api: FakeApi) -> None:
+BEARER_REFRESH = {"x-seamless-auth-transport": "bearer", "authorization": "Bearer r1"}
+
+
+def _start(n: int, run: Any) -> tuple[list[threading.Thread], list[Any]]:
+    results: list[Any] = [None] * n
+
+    def one(i: int) -> None:
+        results[i] = run()
+
+    threads = [threading.Thread(target=one, args=(i,)) for i in range(n)]
+    for t in threads:
+        t.start()
+    return threads, results
+
+
+def _gated_refresh(api: FakeApi) -> tuple[threading.Event, threading.Event]:
+    started = threading.Event()
+    gate = threading.Event()
+
+    def refresh(_req: httpx2.Request) -> httpx2.Response:
+        started.set()
+        gate.wait(2)
+        return httpx2.Response(200, json=session())
+
+    api.on("POST", "/refresh", refresh)
+    return started, gate
+
+
+def test_bearer_refresh_in_flight_is_shared_for_one_refresh_token(api: FakeApi) -> None:
+    started, gate = _gated_refresh(api)
+    adapter = api.adapter()
+
+    first: list[Any] = []
+    leader = threading.Thread(
+        target=lambda: first.append(call(adapter, "POST", "/refresh", headers=BEARER_REFRESH))
+    )
+    leader.start()
+    assert started.wait(2)
+    threads, results = _start(2, lambda: call(adapter, "POST", "/refresh", headers=BEARER_REFRESH))
+    gate.set()
+    leader.join()
+    for t in threads:
+        t.join()
+
+    assert first[0].status == 200
+    assert first[0].body["refreshToken"] == "refresh-u1"
+    for r in results:
+        assert r.body == first[0].body
+    assert len(api.calls_to("POST", "/refresh")) == 1
+    assert not first[0].cookies
+
+
+def test_a_bearer_replay_after_its_rotation_finished_reaches_the_api(api: FakeApi) -> None:
     api.on("POST", "/refresh", respond(200, session()))
     adapter = api.adapter()
-    headers = {"x-seamless-auth-transport": "bearer", "authorization": "Bearer r1"}
 
-    first = call(adapter, "POST", "/refresh", headers=headers)
-    second = call(adapter, "POST", "/refresh", headers=headers)
+    first = call(adapter, "POST", "/refresh", headers=BEARER_REFRESH)
+    api.on("POST", "/refresh", respond(401, {"error": "refresh_token_reused"}))
+    replay = call(adapter, "POST", "/refresh", headers=BEARER_REFRESH)
 
     assert first.status == 200
-    assert first.body["refreshToken"] == "refresh-u1"
-    assert second.body == first.body
+    assert replay.status == 401
+    assert replay.body == {"error": "refresh_token_reused"}
+    assert len(api.calls_to("POST", "/refresh")) == 2
+    assert not adapter._refreshes._flights
+
+
+def test_a_cookie_replay_inside_the_window_gets_the_same_rotation(api: FakeApi) -> None:
+    api.on("POST", "/refresh", respond(200, session()))
+    adapter = api.adapter()
+
+    first = call(adapter, "POST", "/refresh", cookie=REFRESH)
+    replay = call(adapter, "POST", "/refresh", cookie=REFRESH)
+    restored = call(adapter, "GET", "/users/me", cookie=REFRESH)
+
+    assert first.status == 200 and replay.status == 200
+    for name in ("seamless-access", "seamless-refresh"):
+        assert replay.cookies[name].value == first.cookies[name].value, name
+        assert restored.cookies[name].value == first.cookies[name].value, name
     assert len(api.calls_to("POST", "/refresh")) == 1
-    assert not first.cookies
+
+
+def test_a_cookie_replay_after_the_window_reaches_the_api(
+    api: FakeApi, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = [1000.0]
+    monkeypatch.setattr("seamless_auth._refresh.time.monotonic", lambda: clock[0])
+    api.on("POST", "/refresh", respond(200, session()))
+    adapter = api.adapter()
+
+    first = call(adapter, "POST", "/refresh", cookie=REFRESH)
+    clock[0] += 5.5
+    api.on("POST", "/refresh", respond(401, {"error": "refresh_token_reused"}))
+    replay = call(adapter, "POST", "/refresh", cookie=REFRESH)
+
+    assert first.status == 200
+    assert replay.status == 401
+    assert replay.cleared("seamless-access") and replay.cleared("seamless-refresh")
+    assert len(api.calls_to("POST", "/refresh")) == 2
+    assert not adapter._refreshes._flights
+
+
+def test_a_bearer_replay_inside_the_cookie_window_still_reaches_the_api(api: FakeApi) -> None:
+    api.on("POST", "/refresh", respond(200, session()))
+    adapter = api.adapter()
+
+    cookie = call(adapter, "POST", "/refresh", cookie=REFRESH)
+    first = call(adapter, "POST", "/refresh", headers=BEARER_REFRESH)
+    replay = call(adapter, "POST", "/refresh", headers=BEARER_REFRESH)
+
+    assert cookie.status == 200 and first.status == 200 and replay.status == 200
+    assert len(api.calls_to("POST", "/refresh")) == 3
 
 
 def test_bearer_refresh_without_a_token_is_401(api: FakeApi) -> None:
@@ -531,38 +630,67 @@ def test_cross_site_state_changes_are_blocked(api: FakeApi) -> None:
     assert r.status == 400
 
 
-def test_bearer_transport_skips_the_origin_check(api: FakeApi) -> None:
+def test_a_native_bearer_client_passes_the_origin_check(api: FakeApi) -> None:
     api.on("POST", "/login", respond(400, {"error": "invalid_request"}))
     adapter = api.adapter(allowed_origins=["https://app.example"])
-    for headers in ({"sec-fetch-site": "cross-site"}, {"origin": "null"}):
-        r = call(
-            adapter,
-            "POST",
-            "/login",
-            body="{}",
-            headers={"x-seamless-auth-transport": "bearer", **headers},
-        )
-        assert r.status == 400, r.text
-        r = call(adapter, "POST", "/login", body="{}", headers=headers)
-        assert (r.status, r.body) == (403, {"error": "cross_site_request_blocked"})
+    # A native client sends neither fetch metadata nor an Origin.
+    r = call(adapter, "POST", "/login", body="{}", headers={"x-seamless-auth-transport": "bearer"})
+    assert r.status == 400, r.text
+    r = call(
+        adapter,
+        "POST",
+        "/login",
+        body="{}",
+        headers={"x-seamless-auth-transport": "bearer", "origin": "https://evil.example"},
+    )
+    assert (r.status, r.body) == (403, {"error": "cross_site_request_blocked"})
+
+
+@pytest.mark.parametrize("headers", [{"sec-fetch-site": "cross-site"}, {"origin": "null"}])
+def test_bearer_transport_gets_the_origin_check(api: FakeApi, headers: dict[str, str]) -> None:
+    api.on("POST", "/recovery-codes", respond(200, {"ok": True}))
+    adapter = api.adapter()
+
+    r = call(
+        adapter,
+        "POST",
+        "/recovery-codes",
+        content_type=None,
+        headers={"x-seamless-auth-transport": "bearer", "authorization": "Bearer t", **headers},
+    )
+
+    assert (r.status, r.body) == (403, {"error": "cross_site_request_blocked"}), r.text
+    assert not r.cookies, "a bearer reply writes no cookies"
+    assert not api.calls_to("POST", "/recovery-codes")
 
 
 APP = "https://app.example"
+SIBLING = "https://evil.app.example"
 ORIGIN_CASES = [
     # (allowlist, same_site, method, sec-fetch-site, origin, blocked)
-    ((), "None", "POST", "cross-site", None, True),
-    ((), "None", "POST", "same-origin", None, False),
-    ((), "None", "POST", "same-site", None, False),
-    ((), "None", "POST", "same-site", "https://evil.example", False),
-    ((), "None", "POST", None, None, False),
-    ((), "None", "POST", None, "null", True),
-    ((), "None", "POST", None, "https://evil.example", False),
-    ((), "None", "GET", "cross-site", None, False),
-    ((), "None", "OPTIONS", "cross-site", None, False),
-    ((), "Lax", "POST", "cross-site", None, False),
-    ((APP,), "Lax", "POST", "same-site", "https://evil.example", False),
+    (None, "None", "POST", "cross-site", None, True),
+    (None, "None", "POST", "same-origin", None, False),
+    # Without an allowlist the body gate is what stops a sibling's form.
+    (None, "None", "POST", "same-site", None, False),
+    (None, "None", "POST", "same-site", "https://evil.example", False),
+    (None, "None", "POST", "same-site", "null", True),
+    (None, "None", "POST", None, None, False),
+    (None, "None", "POST", None, "null", True),
+    (None, "None", "POST", None, "https://evil.example", False),
+    (None, "None", "GET", "cross-site", None, False),
+    (None, "None", "OPTIONS", "cross-site", None, False),
+    # Whatever the SameSite setting.
+    (None, "Lax", "POST", "cross-site", None, True),
+    (None, "Strict", "POST", "cross-site", None, True),
+    (None, "Lax", "POST", None, "null", True),
+    ((APP,), "Lax", "POST", "same-site", "https://evil.example", True),
+    ((APP,), "Lax", "POST", None, "https://evil.example", True),
+    ((APP,), "Strict", "POST", "same-site", APP, False),
     ((APP,), "None", "POST", None, APP, False),
     ((APP,), "None", "POST", None, "https://evil.example", True),
+    # Neither header is no browser form, so it passes; the body gate still applies.
+    ((APP,), "None", "POST", None, None, False),
+    ((APP,), "Lax", "POST", None, None, False),
     # A sibling subdomain is same-site, so the header alone cannot tell it from the app.
     ((APP,), "None", "POST", "same-site", "https://evil.example", True),
     ((APP,), "None", "POST", "same-site", None, True),
@@ -575,6 +703,21 @@ ORIGIN_CASES = [
     ((APP,), "None", "POST", "cross-site", APP, True),
     ((APP,), "None", "POST", "Cross-Site", APP, True),
     ((APP,), "None", "GET", "same-site", "https://evil.example", False),
+    # A configured empty allowlist is strict: only same-origin requests pass.
+    ((), "None", "POST", "same-site", APP, True),
+    ((), "Lax", "POST", "same-site", APP, True),
+    ((), "None", "POST", None, APP, True),
+    ((), "None", "POST", None, None, False),
+    ((), "None", "POST", "same-origin", None, False),
+    ((), "None", "GET", "same-site", APP, False),
+    # Origin: null is refused first, whatever the fetch metadata or allowlist says.
+    (None, "None", "POST", "same-origin", "null", True),
+    (None, "None", "POST", "none", "null", True),
+    ((APP,), "None", "POST", "same-origin", "null", True),
+    (None, "Lax", "POST", "same-origin", " NULL ", True),
+    (None, "None", "POST", None, "Null", True),
+    (None, "None", "POST", "same-site", " null", True),
+    (None, "None", "GET", "same-origin", "null", False),
     # Neither normalizes to an origin, so neither can match the other.
     (("not an origin",), "None", "POST", "same-site", "also not one", True),
     (("not an origin",), "None", "POST", None, "also not one", True),
@@ -582,7 +725,7 @@ ORIGIN_CASES = [
 ]
 
 
-OriginCase = tuple[tuple[str, ...], str, str, str | None, str | None, bool]
+OriginCase = tuple[tuple[str, ...] | None, str, str, str | None, str | None, bool]
 
 
 @pytest.mark.parametrize("case", ORIGIN_CASES)
@@ -599,6 +742,115 @@ def test_the_origin_check(api: FakeApi, case: OriginCase) -> None:
         assert not api.calls_to(method, "/login")
     else:
         assert r.status != 403, r.text
+
+
+# Cookie-authenticated routes a forged form POST can drive with no body at all.
+FORM_POST_TARGETS = ["/recovery-codes", "/totp/enroll/start", "/admin/applications/app-1/secret"]
+
+
+@pytest.mark.parametrize("path", FORM_POST_TARGETS)
+@pytest.mark.parametrize("site", ["same-site", None])
+@pytest.mark.parametrize("same_site", ["Lax", "None"])
+def test_a_body_less_form_post_does_not_reach_a_cookie_route(
+    api: FakeApi, path: str, site: str | None, same_site: str
+) -> None:
+    api.on("POST", path, respond(200, {"ok": True}))
+    adapter = api.adapter(same_site=same_site)
+    # What a sibling subdomain's <form method="post"> sends: no body, a form
+    # content type, and either same-site fetch metadata or none at all.
+    headers = {"content-type": "application/x-www-form-urlencoded", "origin": SIBLING}
+    if site is not None:
+        headers["sec-fetch-site"] = site
+
+    r = call(adapter, "POST", path, cookie=access(), headers=headers)
+
+    assert r.status in (403, 415), r.text
+    assert not api.calls_to("POST", path)
+
+
+@pytest.mark.parametrize("same_site", ["Lax", "Strict", "None"])
+@pytest.mark.parametrize(
+    ("method", "path"), [("POST", "/refresh"), ("DELETE", "/logout"), ("DELETE", "/logout/all")]
+)
+def test_refresh_and_logout_get_the_origin_check_and_keep_the_cookies(
+    api: FakeApi, same_site: str, method: str, path: str
+) -> None:
+    api.on("POST", "/refresh", respond(200, session()))
+    api.on("DELETE", "/logout", respond(204, None))
+    api.on("DELETE", "/logout/all", respond(204, None))
+    adapter = api.adapter(allowed_origins=[APP], same_site=same_site)
+    for headers in (
+        {"sec-fetch-site": "cross-site"},
+        {"sec-fetch-site": "same-site", "origin": SIBLING},
+        {"origin": SIBLING},
+    ):
+        r = call(adapter, method, path, content_type=None, cookie=REFRESH, headers=headers)
+        assert (r.status, r.body) == (403, {"error": "cross_site_request_blocked"}), headers
+        assert not r.cookies, "a refused request must not clear the session"
+    assert not api.calls_to(method, path)
+
+    # Exempt from the content-type gate: the client sends these with no body. With
+    # neither fetch metadata nor an Origin it passes the origin check too.
+    r = call(adapter, method, path, content_type=None, cookie=REFRESH)
+    assert r.status not in (403, 415), r.text
+
+
+def test_a_state_change_with_no_body_needs_json_or_the_transport_header(api: FakeApi) -> None:
+    api.on("POST", "/recovery-codes", respond(200, {"ok": True}))
+    api.on("GET", "/recovery-codes", respond(200, {"ok": True}))
+    adapter = api.adapter()
+
+    for content_type in (None, "text/plain", "application/x-www-form-urlencoded"):
+        r = call(adapter, "POST", "/recovery-codes", content_type=content_type, cookie=access())
+        assert (r.status, r.body) == (415, {"error": "unsupported_media_type"}), content_type
+    assert not api.calls_to("POST", "/recovery-codes")
+    # Passing the origin check with neither header does not skip the body gate.
+    strict = api.adapter(allowed_origins=[APP])
+    r = call(strict, "POST", "/recovery-codes", content_type=None, cookie=access())
+    assert r.status == 415
+    assert not api.calls_to("POST", "/recovery-codes")
+
+    assert call(adapter, "POST", "/recovery-codes", cookie=access()).status == 200
+    for transport in ("cookie", "bearer"):
+        r = call(
+            adapter,
+            "POST",
+            "/recovery-codes",
+            content_type=None,
+            cookie=access(),
+            headers={"x-seamless-auth-transport": transport, "authorization": "Bearer t"},
+        )
+        assert r.status == 200, (transport, r.text)
+    # The header stands in for a content type only when there is no body to read.
+    r = call(
+        adapter,
+        "POST",
+        "/recovery-codes",
+        body="{}",
+        content_type="text/plain",
+        cookie=access(),
+        headers={"x-seamless-auth-transport": "cookie"},
+    )
+    assert r.status == 415
+    r = call(adapter, "GET", "/recovery-codes", content_type=None, cookie=access())
+    assert r.status == 200
+
+
+@pytest.mark.parametrize("site", ["same-site", None, "cross-site"])
+@pytest.mark.parametrize("same_site", ["Lax", "Strict"])
+def test_the_allowlist_holds_whatever_the_same_site_setting(
+    api: FakeApi, site: str | None, same_site: str
+) -> None:
+    api.on("POST", "/recovery-codes", respond(200, {"ok": True}))
+    adapter = api.adapter(allowed_origins=[APP], same_site=same_site)
+    headers = {"origin": SIBLING}
+    if site is not None:
+        headers["sec-fetch-site"] = site
+
+    r = call(adapter, "POST", "/recovery-codes", body="{}", cookie=access(), headers=headers)
+
+    assert (r.status, r.body) == (403, {"error": "cross_site_request_blocked"})
+    assert not api.calls_to("POST", "/recovery-codes")
 
 
 def test_the_live_manifest_adds_routes(api: FakeApi) -> None:
@@ -920,3 +1172,37 @@ def test_a_client_without_a_timeout_gets_one(api: FakeApi) -> None:
     assert adapter._timeout == {"timeout": 15.0}
     # The test client keeps httpx2's default timeout, so it is left alone.
     assert api.adapter()._timeout == {}
+
+
+def test_a_caller_client_that_follows_redirects_does_not_carry_the_service_token_away(
+    api: FakeApi,
+) -> None:
+    hosts: list[str] = []
+
+    def handle(request: httpx2.Request) -> httpx2.Response:
+        hosts.append(request.url.host)
+        return api.handle(request)
+
+    api.on(
+        "POST",
+        "/login",
+        lambda _r: httpx2.Response(307, headers={"location": "http://evil.test/steal"}),
+    )
+    client = httpx2.Client(transport=httpx2.MockTransport(handle), follow_redirects=True)
+
+    r = call(api.adapter(http_client=client), "POST", "/login", body="{}")
+
+    assert "evil.test" not in hosts
+    assert r.status == 307
+
+
+def test_logout_with_an_unreadable_access_cookie_still_ends_the_session(api: FakeApi) -> None:
+    api.on("POST", "/refresh", respond(200, session()))
+    api.on("DELETE", "/logout", respond(200, {"message": "Success"}))
+
+    r = call(api.adapter(), "DELETE", "/logout", cookie=f"{access()}x; {REFRESH}")
+
+    assert len(api.calls_to("DELETE", "/logout")) == 1
+    assert r.status == 204
+    for name in ("seamless-access", "seamless-ephemeral", "seamless-refresh"):
+        assert r.cleared(name), name
