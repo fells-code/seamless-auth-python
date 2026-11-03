@@ -52,30 +52,61 @@ class JwksCache:
         self._keys: dict[str, Jwk] | None = None
         self._fetched_at: float | None = None
         self._attempted_at: float | None = None
+        # Set while a fetch is in flight; waiters block on it, never on the lock.
+        self._fetching: threading.Event | None = None
 
     def key(self, kid: str) -> Jwk:
-        with self._lock:
-            now = time.monotonic()
-            fresh = self._fetched_at is not None and now - self._fetched_at < MAX_AGE
-            if fresh and self._keys is not None and kid in self._keys:
-                return self._keys[kid]
+        # The lock guards the cache only and is never held across the network: a
+        # slow JWKS endpoint must not queue verifications of keys already known.
+        while True:
+            with self._lock:
+                now = time.monotonic()
+                keys = self._keys
+                fresh = self._fetched_at is not None and now - self._fetched_at < MAX_AGE
+                if keys is not None and kid in keys and (fresh or self._fetching is not None):
+                    return keys[kid]
+                in_flight = self._fetching
+                if in_flight is None:
+                    backoff = REFETCH_INTERVAL if keys is not None else FAILED_FETCH_BACKOFF
+                    if self._attempted_at is not None and now - self._attempted_at < backoff:
+                        if keys is None or kid not in keys:
+                            raise TokenError(f"unknown key id {kid!r}")
+                        return keys[kid]
+                    self._attempted_at = now
+                    self._fetching = threading.Event()
+            if in_flight is not None:
+                # Single flight: wait for the fetch another caller started, then
+                # look again (within the backoff, so this cannot start a second).
+                in_flight.wait()
+                continue
+            return self._refresh(kid)
 
-            backoff = REFETCH_INTERVAL if self._keys is not None else FAILED_FETCH_BACKOFF
-            if self._attempted_at is None or now - self._attempted_at >= backoff:
-                self._attempted_at = now
-                try:
-                    self._keys = self._fetch()
+    def _refresh(self, kid: str) -> Jwk:
+        fetched: dict[str, Jwk] | None = None
+        error: Exception | None = None
+        try:
+            fetched = self._fetch()
+        except Exception as err:
+            error = err
+        finally:
+            # Released whatever happens, or every waiter would block for good.
+            with self._lock:
+                if fetched is not None:
+                    self._keys = fetched
                     self._fetched_at = time.monotonic()
-                except Exception as err:
-                    # A stale key set keeps verifying while the API cannot be
-                    # reached, rather than signing every user out.
-                    if self._keys is None:
-                        raise TokenError(f"jwks: {err}") from err
-                    log.warning("[seamless-auth] Could not refresh the JWKS (%s).", err)
-
-            if self._keys is None or kid not in self._keys:
-                raise TokenError(f"unknown key id {kid!r}")
-            return self._keys[kid]
+                done, self._fetching = self._fetching, None
+                keys = self._keys
+            if done is not None:
+                done.set()
+        if error is not None:
+            # A stale key set keeps verifying while the API cannot be reached,
+            # rather than signing every user out.
+            if keys is None:
+                raise TokenError(f"jwks: {error}") from error
+            log.warning("[seamless-auth] Could not refresh the JWKS (%s).", error)
+        if keys is None or kid not in keys:
+            raise TokenError(f"unknown key id {kid!r}")
+        return keys[kid]
 
     def _fetch(self) -> dict[str, Jwk]:
         with self._client.stream("GET", self._url, timeout=FETCH_TIMEOUT) as res:

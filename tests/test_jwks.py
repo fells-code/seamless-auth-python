@@ -5,6 +5,7 @@ import threading
 import time
 
 import httpx2
+import pytest
 from conftest import API_URL, JWKS, api_token
 
 from seamless_auth._jwks import REFETCH_INTERVAL, JwksCache, TokenError
@@ -75,3 +76,20 @@ def test_concurrent_misses_share_one_fetch() -> None:
 def _swallow(cache: JwksCache, kid: str) -> None:
     with contextlib.suppress(TokenError):
         cache.key(kid)
+
+
+def test_a_failed_fetch_releases_its_waiters() -> None:
+    fetches = 0
+
+    def failing(_request: httpx2.Request) -> httpx2.Response:
+        nonlocal fetches
+        fetches += 1
+        return httpx2.Response(503)
+
+    cache = JwksCache(JWKS_URL, httpx2.Client(transport=httpx2.MockTransport(failing)))
+
+    for _ in range(2):
+        with pytest.raises(TokenError):
+            cache.key("k1")
+    assert fetches == 1, "a second miss inside the backoff does not fetch again"
+    assert cache._fetching is None
