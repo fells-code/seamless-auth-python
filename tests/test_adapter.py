@@ -221,19 +221,118 @@ def test_post_refresh_rotates_both_cookies_and_returns_no_tokens(api: FakeApi) -
     assert "seamless-access" in r.cookies and "seamless-refresh" in r.cookies
 
 
-def test_bearer_refresh_is_shared_for_one_refresh_token(api: FakeApi) -> None:
+BEARER_REFRESH = {"x-seamless-auth-transport": "bearer", "authorization": "Bearer r1"}
+
+
+def _start(n: int, run: Any) -> tuple[list[threading.Thread], list[Any]]:
+    results: list[Any] = [None] * n
+
+    def one(i: int) -> None:
+        results[i] = run()
+
+    threads = [threading.Thread(target=one, args=(i,)) for i in range(n)]
+    for t in threads:
+        t.start()
+    return threads, results
+
+
+def _gated_refresh(api: FakeApi) -> tuple[threading.Event, threading.Event]:
+    started = threading.Event()
+    gate = threading.Event()
+
+    def refresh(_req: httpx2.Request) -> httpx2.Response:
+        started.set()
+        gate.wait(2)
+        return httpx2.Response(200, json=session())
+
+    api.on("POST", "/refresh", refresh)
+    return started, gate
+
+
+def test_bearer_refresh_in_flight_is_shared_for_one_refresh_token(api: FakeApi) -> None:
+    started, gate = _gated_refresh(api)
+    adapter = api.adapter()
+
+    first: list[Any] = []
+    leader = threading.Thread(
+        target=lambda: first.append(call(adapter, "POST", "/refresh", headers=BEARER_REFRESH))
+    )
+    leader.start()
+    assert started.wait(2)
+    threads, results = _start(2, lambda: call(adapter, "POST", "/refresh", headers=BEARER_REFRESH))
+    gate.set()
+    leader.join()
+    for t in threads:
+        t.join()
+
+    assert first[0].status == 200
+    assert first[0].body["refreshToken"] == "refresh-u1"
+    for r in results:
+        assert r.body == first[0].body
+    assert len(api.calls_to("POST", "/refresh")) == 1
+    assert not first[0].cookies
+
+
+def test_a_bearer_replay_after_its_rotation_finished_reaches_the_api(api: FakeApi) -> None:
     api.on("POST", "/refresh", respond(200, session()))
     adapter = api.adapter()
-    headers = {"x-seamless-auth-transport": "bearer", "authorization": "Bearer r1"}
 
-    first = call(adapter, "POST", "/refresh", headers=headers)
-    second = call(adapter, "POST", "/refresh", headers=headers)
+    first = call(adapter, "POST", "/refresh", headers=BEARER_REFRESH)
+    api.on("POST", "/refresh", respond(401, {"error": "refresh_token_reused"}))
+    replay = call(adapter, "POST", "/refresh", headers=BEARER_REFRESH)
 
     assert first.status == 200
-    assert first.body["refreshToken"] == "refresh-u1"
-    assert second.body == first.body
+    assert replay.status == 401
+    assert replay.body == {"error": "refresh_token_reused"}
+    assert len(api.calls_to("POST", "/refresh")) == 2
+    assert not adapter._refreshes._flights
+
+
+def test_a_cookie_replay_inside_the_window_gets_the_same_rotation(api: FakeApi) -> None:
+    api.on("POST", "/refresh", respond(200, session()))
+    adapter = api.adapter()
+
+    first = call(adapter, "POST", "/refresh", cookie=REFRESH)
+    replay = call(adapter, "POST", "/refresh", cookie=REFRESH)
+    restored = call(adapter, "GET", "/users/me", cookie=REFRESH)
+
+    assert first.status == 200 and replay.status == 200
+    for name in ("seamless-access", "seamless-refresh"):
+        assert replay.cookies[name].value == first.cookies[name].value, name
+        assert restored.cookies[name].value == first.cookies[name].value, name
     assert len(api.calls_to("POST", "/refresh")) == 1
-    assert not first.cookies
+
+
+def test_a_cookie_replay_after_the_window_reaches_the_api(
+    api: FakeApi, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = [1000.0]
+    monkeypatch.setattr("seamless_auth._refresh.time.monotonic", lambda: clock[0])
+    api.on("POST", "/refresh", respond(200, session()))
+    adapter = api.adapter()
+
+    first = call(adapter, "POST", "/refresh", cookie=REFRESH)
+    clock[0] += 5.5
+    api.on("POST", "/refresh", respond(401, {"error": "refresh_token_reused"}))
+    replay = call(adapter, "POST", "/refresh", cookie=REFRESH)
+
+    assert first.status == 200
+    assert replay.status == 401
+    assert replay.cleared("seamless-access") and replay.cleared("seamless-refresh")
+    assert len(api.calls_to("POST", "/refresh")) == 2
+    assert not adapter._refreshes._flights
+
+
+def test_a_bearer_replay_inside_the_cookie_window_still_reaches_the_api(api: FakeApi) -> None:
+    api.on("POST", "/refresh", respond(200, session()))
+    adapter = api.adapter()
+
+    cookie = call(adapter, "POST", "/refresh", cookie=REFRESH)
+    first = call(adapter, "POST", "/refresh", headers=BEARER_REFRESH)
+    replay = call(adapter, "POST", "/refresh", headers=BEARER_REFRESH)
+
+    assert cookie.status == 200 and first.status == 200 and replay.status == 200
+    assert len(api.calls_to("POST", "/refresh")) == 3
 
 
 def test_bearer_refresh_without_a_token_is_401(api: FakeApi) -> None:
