@@ -207,7 +207,8 @@ JSON it would be a sign-in the user never made.
 A state change on an auth route (any method but `GET`, `HEAD` and `OPTIONS`) needs that content
 type even with no body, or else an `x-seamless-auth-transport` header (`cookie` or `bearer`).
 Either one forces a CORS preflight, which a form on a sibling subdomain cannot send, so a body-less
-form post answers 415 too. `POST /auth/refresh` and `DELETE /auth/logout` are exempt.
+form post answers 415 too. `POST /auth/refresh`, `DELETE /auth/logout` and
+`DELETE /auth/logout/all` are exempt, though they still get the cross-site check.
 
 ## Options
 

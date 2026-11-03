@@ -643,12 +643,15 @@ def test_a_body_less_form_post_does_not_reach_a_cookie_route(
 
 
 @pytest.mark.parametrize("same_site", ["Lax", "Strict", "None"])
-@pytest.mark.parametrize(("method", "path"), [("POST", "/refresh"), ("DELETE", "/logout")])
+@pytest.mark.parametrize(
+    ("method", "path"), [("POST", "/refresh"), ("DELETE", "/logout"), ("DELETE", "/logout/all")]
+)
 def test_refresh_and_logout_get_the_origin_check_and_keep_the_cookies(
     api: FakeApi, same_site: str, method: str, path: str
 ) -> None:
     api.on("POST", "/refresh", respond(200, session()))
     api.on("DELETE", "/logout", respond(204, None))
+    api.on("DELETE", "/logout/all", respond(204, None))
     adapter = api.adapter(allowed_origins=[APP], same_site=same_site)
     for headers in (
         {"sec-fetch-site": "cross-site"},
@@ -660,7 +663,7 @@ def test_refresh_and_logout_get_the_origin_check_and_keep_the_cookies(
         assert not r.cookies, "a refused request must not clear the session"
     assert not api.calls_to(method, path)
 
-    # Exempt from the content-type gate: the client sends both with no body.
+    # Exempt from the content-type gate: the client sends these with no body.
     r = call(adapter, method, path, content_type=None, cookie=REFRESH)
     assert r.status != 415, r.text
 
