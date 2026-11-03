@@ -524,6 +524,20 @@ cookie transport only, a request presenting the same refresh cookie within 5 sec
 the same rotated session, so several tabs with one expired session all succeed. A bearer client
 presenting a spent refresh token always reaches the auth API.
 
+Only a successful rotation is shared for those 5 seconds, and only a refresh the auth API refuses
+ends a browser session. In cookie transport, both the silent refresh on an auth route and
+`POST /auth/refresh` clear the session cookies only when the auth API answers the refresh with 401
+(silent refresh answers 401 `Refresh failed`, `POST /auth/refresh` answers 401
+`invalid_refresh_token`) or when the refresh cookie cannot be read. Any other failure keeps the
+cookies, so the next request tries again:
+
+| The refresh | The answer |
+| --- | --- |
+| does not reach the auth API | 502 `upstream_unavailable` |
+| gets another non-2xx answer (a 503 during maintenance, a 429) | that status and body |
+| gets a 2xx with no session, or one that fails verification | 502 `upstream_unavailable` |
+| waits on another request's rotation for it and times out | 502 `upstream_unavailable` |
+
 ## The manifest
 
 On its first request the adapter fetches `/.well-known/seamless-adapter.json` from the auth API
