@@ -531,20 +531,20 @@ def test_cross_site_state_changes_are_blocked(api: FakeApi) -> None:
     assert r.status == 400
 
 
-def test_bearer_transport_skips_the_origin_check(api: FakeApi) -> None:
+def test_a_native_bearer_client_passes_the_origin_check(api: FakeApi) -> None:
     api.on("POST", "/login", respond(400, {"error": "invalid_request"}))
     adapter = api.adapter(allowed_origins=["https://app.example"])
-    for headers in ({"sec-fetch-site": "cross-site"}, {"origin": "null"}):
-        r = call(
-            adapter,
-            "POST",
-            "/login",
-            body="{}",
-            headers={"x-seamless-auth-transport": "bearer", **headers},
-        )
-        assert r.status == 400, r.text
-        r = call(adapter, "POST", "/login", body="{}", headers=headers)
-        assert (r.status, r.body) == (403, {"error": "cross_site_request_blocked"})
+    # A native client sends neither fetch metadata nor an Origin.
+    r = call(adapter, "POST", "/login", body="{}", headers={"x-seamless-auth-transport": "bearer"})
+    assert r.status == 400, r.text
+    r = call(
+        adapter,
+        "POST",
+        "/login",
+        body="{}",
+        headers={"x-seamless-auth-transport": "bearer", "origin": "https://evil.example"},
+    )
+    assert (r.status, r.body) == (403, {"error": "cross_site_request_blocked"})
 
 
 @pytest.mark.parametrize("headers", [{"sec-fetch-site": "cross-site"}, {"origin": "null"}])

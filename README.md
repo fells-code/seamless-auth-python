@@ -150,9 +150,10 @@ subdomain is same-site, so `SameSite=Lax` or `Strict` still sends it the cookies
 - `allowed_origins=[]` is strict: no `Origin` is on it, so a same-site request, or one with an
   `Origin` and no `Sec-Fetch-Site`, answers 403.
 
-A bearer token is never attached by a browser, so it is not checked. For the same reason the auth
-routes skip the check on a bearer-transport request (`x-seamless-auth-transport: bearer`), which
-reads no cookies.
+A bearer token is never attached by a browser, so the guard does not check a request it admits on
+one. The auth routes check every state change, bearer transport (`x-seamless-auth-transport:
+bearer`) included, as the other adapters do. A native client sends neither `Sec-Fetch-Site` nor
+`Origin`, so it passes.
 
 `User.organization_id` is the active organization, from the `org_id` claim of the verified access
 token, or `None` when the session has none. Like `User.roles`, it never comes from the cookie.

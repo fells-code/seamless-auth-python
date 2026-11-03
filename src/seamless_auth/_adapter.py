@@ -328,12 +328,11 @@ class Adapter:
 
     def _handle(self, request: AuthRequest) -> AuthResponse:
         bearer = (request.headers.get(TRANSPORT_HEADER) or "").lower() == "bearer"
-        # Bearer transport reads no cookies, so a cross-site request has nothing of the
-        # user's to ride on. A custom header also needs a CORS preflight to be sent.
-        if not bearer:
-            blocked = self._check_origin(request.method, request.headers)
-            if blocked is not None:
-                return self._write(blocked, bearer=False)
+        # Both transports, as the other adapters: a native bearer client sends
+        # neither fetch metadata nor an Origin, so it passes.
+        blocked = self._check_origin(request.method, request.headers)
+        if blocked is not None:
+            return self._write(blocked, bearer=bearer)
 
         forwarded = self._forwarded(request)
         method = request.method.upper()
