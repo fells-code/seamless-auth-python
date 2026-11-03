@@ -110,3 +110,15 @@ def test_a_caller_client_that_follows_redirects_does_not_fetch_keys_elsewhere() 
     with pytest.raises(TokenError):
         cache.verify(api_token("u1", "access"), API_URL, API_URL)
     assert "evil.test" not in hosts
+
+
+@pytest.mark.parametrize(("member", "value"), [("use", "enc"), ("alg", "RS512")])
+def test_a_key_published_for_another_use_does_not_verify(member: str, value: str) -> None:
+    jwks = {"keys": [{**JWKS["keys"][0], member: value}]}
+    client = httpx2.Client(
+        transport=httpx2.MockTransport(lambda _r: httpx2.Response(200, json=jwks))
+    )
+    cache = JwksCache(JWKS_URL, client)
+
+    with pytest.raises(TokenError):
+        cache.verify(api_token("u1", "access"), API_URL, API_URL)
