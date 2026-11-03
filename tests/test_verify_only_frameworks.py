@@ -183,14 +183,24 @@ def test_fastapi_confirm_hook_url_does_not_come_from_the_host_header() -> None:
     server = Provider().server(confirm=confirm)
     app = FastAPI()
 
+    bearer = RequireBearer(server, base_url="https://api.example")
+
     @app.get("/orders")
-    def orders(user: VerifiedUser = Depends(RequireBearer(server))) -> dict[str, str]:  # noqa: B008
+    def orders(user: VerifiedUser = Depends(bearer)) -> dict[str, str]:  # noqa: B008
         return {"sub": user.sub}
 
-    r = TestClient(app, base_url="https://api.example").get(
+    r = TestClient(app, base_url="http://evil.test").get(
         "/orders?page=2",
         headers={"authorization": f"Bearer {VECTORS['tokens']['cnf_bound']}", "host": "evil.test"},
     )
 
     assert r.status_code == 200
     assert seen == ["https://api.example/orders?page=2"]
+
+
+@pytest.mark.parametrize(
+    "base_url", ["api.example", "ftp://api.example", "https://api.example/v1", "https://"]
+)
+def test_fastapi_base_url_must_be_an_origin(base_url: str) -> None:
+    with pytest.raises(ValueError, match="base_url"):
+        RequireBearer(Provider().server(), base_url=base_url)

@@ -507,6 +507,13 @@ def confirm(cnf, request):
 rs = ResourceServer(issuer=..., audience=..., confirm=confirm)
 ```
 
+The URL is built from the request, and its host from a `Host` header the client chooses. Under
+FastAPI, pass the API's public origin so a proof's `htu` is checked against it instead:
+`RequireBearer(rs, base_url="https://api.example.com")`. Without it, put Starlette's
+`TrustedHostMiddleware` in front of the app, and behind a proxy trust its forwarded headers only
+from that proxy. Under Django the URL comes from `build_absolute_uri()`, which `ALLOWED_HOSTS`
+already guards.
+
 ## How it runs
 
 The adapter is synchronous and thread-safe: one `Adapter` serves the whole process. Under FastAPI
