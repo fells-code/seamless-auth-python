@@ -548,6 +548,7 @@ def test_bearer_transport_skips_the_origin_check(api: FakeApi) -> None:
 
 
 APP = "https://app.example"
+SIBLING = "https://evil.app.example"
 ORIGIN_CASES = [
     # (allowlist, same_site, method, sec-fetch-site, origin, blocked)
     ((), "None", "POST", "cross-site", None, True),
@@ -599,6 +600,47 @@ def test_the_origin_check(api: FakeApi, case: OriginCase) -> None:
         assert not api.calls_to(method, "/login")
     else:
         assert r.status != 403, r.text
+
+
+# Cookie-authenticated routes a forged form POST can drive with no body at all.
+FORM_POST_TARGETS = ["/recovery-codes", "/totp/enroll/start", "/admin/applications/app-1/secret"]
+
+
+@pytest.mark.parametrize("path", FORM_POST_TARGETS)
+@pytest.mark.parametrize("site", ["same-site", None])
+@pytest.mark.parametrize("same_site", ["Lax", "None"])
+def test_a_body_less_form_post_does_not_reach_a_cookie_route(
+    api: FakeApi, path: str, site: str | None, same_site: str
+) -> None:
+    api.on("POST", path, respond(200, {"ok": True}))
+    adapter = api.adapter(same_site=same_site)
+    # What a sibling subdomain's <form method="post"> sends: no body, a form
+    # content type, and either same-site fetch metadata or none at all.
+    headers = {"content-type": "application/x-www-form-urlencoded", "origin": SIBLING}
+    if site is not None:
+        headers["sec-fetch-site"] = site
+
+    r = call(adapter, "POST", path, cookie=access(), headers=headers)
+
+    assert r.status in (403, 415), r.text
+    assert not api.calls_to("POST", path)
+
+
+@pytest.mark.parametrize("site", ["same-site", None, "cross-site"])
+@pytest.mark.parametrize("same_site", ["Lax", "Strict"])
+def test_the_allowlist_holds_whatever_the_same_site_setting(
+    api: FakeApi, site: str | None, same_site: str
+) -> None:
+    api.on("POST", "/recovery-codes", respond(200, {"ok": True}))
+    adapter = api.adapter(allowed_origins=[APP], same_site=same_site)
+    headers = {"origin": SIBLING}
+    if site is not None:
+        headers["sec-fetch-site"] = site
+
+    r = call(adapter, "POST", "/recovery-codes", body="{}", cookie=access(), headers=headers)
+
+    assert (r.status, r.body) == (403, {"error": "cross_site_request_blocked"})
+    assert not api.calls_to("POST", "/recovery-codes")
 
 
 def test_the_live_manifest_adds_routes(api: FakeApi) -> None:
