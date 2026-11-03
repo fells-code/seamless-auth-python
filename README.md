@@ -235,7 +235,7 @@ form post answers 415 too. `POST /auth/refresh`, `DELETE /auth/logout` and
 | `deliver_account_notices` | `False` | `deliver` also sends account notices to the owner (below) |
 | `resolve_client_ip` | the connecting peer | The end user's address. See below |
 | `disable_manifest_fetch` | `False` | Use only the manifest bundled with this version |
-| `http_client` | 15 second timeout, no redirects | Outbound `httpx2.Client` |
+| `http_client` | 15 second timeout | Outbound `httpx2.Client`. Redirects are never followed, whatever it is set to |
 
 The adapter refuses to start with a known placeholder for either secret, such as the starters'
 `dev-only-cookie-signing-key-replace-me`, `GRAB_FROM_SEAMLESS_AUTH_PORTAL_DEV`, or anything

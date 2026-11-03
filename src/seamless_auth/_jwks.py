@@ -109,7 +109,9 @@ class JwksCache:
         return keys[kid]
 
     def _fetch(self) -> dict[str, Jwk]:
-        with self._client.stream("GET", self._url, timeout=FETCH_TIMEOUT) as res:
+        with self._client.stream(
+            "GET", self._url, timeout=FETCH_TIMEOUT, follow_redirects=False
+        ) as res:
             if res.status_code != 200:
                 raise TokenError(f"HTTP {res.status_code}")
             body = read_limited(res, MAX_JWKS_BYTES)

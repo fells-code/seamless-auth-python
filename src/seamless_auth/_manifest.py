@@ -243,7 +243,9 @@ class ManifestSource:
 
     def _load(self) -> Manifest:
         headers = {"accept": "application/json"}
-        with self._client.stream("GET", self._url, headers=headers, timeout=FETCH_TIMEOUT) as res:
+        with self._client.stream(
+            "GET", self._url, headers=headers, timeout=FETCH_TIMEOUT, follow_redirects=False
+        ) as res:
             if res.status_code != 200:
                 raise ManifestError(f"HTTP {res.status_code}")
             return Manifest.parse(read_limited(res, MAX_MANIFEST_BYTES))

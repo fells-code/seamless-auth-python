@@ -181,7 +181,7 @@ class ResourceServer:
 
     def _discover(self) -> str:
         url = self.issuer.rstrip("/") + DISCOVERY_PATH
-        with self._client.stream("GET", url, timeout=FETCH_TIMEOUT) as res:
+        with self._client.stream("GET", url, timeout=FETCH_TIMEOUT, follow_redirects=False) as res:
             if res.status_code != 200:
                 raise TokenError(f"HTTP {res.status_code}")
             body = read_limited(res, MAX_DISCOVERY_BYTES)

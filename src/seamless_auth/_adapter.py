@@ -273,7 +273,8 @@ class Adapter:
             pre_auth_cookie_name=pre_auth_cookie_name,
         )
         # A client that follows redirects would carry the service token to wherever
-        # the auth API pointed it.
+        # the auth API pointed it, so every request also says not to: a supplied
+        # client may have been built to follow them.
         self._client = http_client or httpx2.Client(
             timeout=UPSTREAM_TIMEOUT, follow_redirects=False
         )
@@ -429,7 +430,7 @@ class Adapter:
             request = self._client.build_request(
                 method, url, headers=headers, content=content, **self._timeout
             )
-            return self._client.send(request, stream=stream)
+            return self._client.send(request, stream=stream, follow_redirects=False)
         except (httpx2.HTTPError, httpx2.InvalidURL, UnicodeError, ValueError) as err:
             # The type only: the text of these holds the URL, and a path or query
             # can hold a magic-link token or an OAuth code.
