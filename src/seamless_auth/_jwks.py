@@ -41,6 +41,15 @@ class Jwk:
     key: RSAPublicKey
     params: dict[str, Any]
 
+    def check_rs256_signing(self) -> None:
+        """Refuses a key its JWK publishes for another use or algorithm."""
+        if self.params.get("kty") != "RSA":
+            raise TokenError("not an RSA key")
+        if "use" in self.params and self.params["use"] != "sig":
+            raise TokenError("key is not for signatures")
+        if "alg" in self.params and self.params["alg"] != "RS256":
+            raise TokenError("key is for another algorithm")
+
 
 class JwksCache:
     """The key set at ``url``, fetched on first use and kept fresh."""
@@ -142,11 +151,12 @@ class JwksCache:
         if header.get("alg") != "RS256":
             raise TokenError("unexpected algorithm")
         kid = header.get("kid")
-        key = self.key(kid if isinstance(kid, str) else "").key
+        jwk = self.key(kid if isinstance(kid, str) else "")
+        jwk.check_rs256_signing()
         try:
             claims: Claims = jwt.decode(
                 token,
-                key,
+                jwk.key,
                 algorithms=["RS256"],
                 issuer=issuer,
                 audience=audience,
