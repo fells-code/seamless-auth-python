@@ -642,6 +642,29 @@ def test_a_body_less_form_post_does_not_reach_a_cookie_route(
     assert not api.calls_to("POST", path)
 
 
+@pytest.mark.parametrize("same_site", ["Lax", "Strict", "None"])
+@pytest.mark.parametrize(("method", "path"), [("POST", "/refresh"), ("DELETE", "/logout")])
+def test_refresh_and_logout_get_the_origin_check_and_keep_the_cookies(
+    api: FakeApi, same_site: str, method: str, path: str
+) -> None:
+    api.on("POST", "/refresh", respond(200, session()))
+    api.on("DELETE", "/logout", respond(204, None))
+    adapter = api.adapter(allowed_origins=[APP], same_site=same_site)
+    for headers in (
+        {"sec-fetch-site": "cross-site"},
+        {"sec-fetch-site": "same-site", "origin": SIBLING},
+        {"origin": SIBLING},
+    ):
+        r = call(adapter, method, path, content_type=None, cookie=REFRESH, headers=headers)
+        assert (r.status, r.body) == (403, {"error": "cross_site_request_blocked"}), headers
+        assert not r.cookies, "a refused request must not clear the session"
+    assert not api.calls_to(method, path)
+
+    # Exempt from the content-type gate: the client sends both with no body.
+    r = call(adapter, method, path, content_type=None, cookie=REFRESH)
+    assert r.status != 415, r.text
+
+
 def test_a_state_change_with_no_body_needs_json_or_the_transport_header(api: FakeApi) -> None:
     api.on("POST", "/recovery-codes", respond(200, {"ok": True}))
     api.on("GET", "/recovery-codes", respond(200, {"ok": True}))
