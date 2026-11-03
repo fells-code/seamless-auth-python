@@ -739,7 +739,7 @@ class Adapter:
             return issued
         service = self._sign_service(sub, {"refreshToken": refresh_token})
         outcome = self._refreshes.share(
-            key, lambda: self._rotate(forwarded, refresh_token, service)
+            key, lambda: self._rotate(forwarded, refresh_token, service), keep=True
         )
         if outcome.session is None:
             log.debug("[seamless-auth] Refresh after enrollment failed")
@@ -795,7 +795,7 @@ class Adapter:
         service = self._sign_service(str_claim(payload, "sub"), {"refreshToken": refresh_token})
 
         outcome = self._refreshes.share(
-            f"cookie:{raw}", lambda: self._rotate(forwarded, refresh_token, service)
+            f"cookie:{raw}", lambda: self._rotate(forwarded, refresh_token, service), keep=True
         )
         if outcome.session is None:
             return outcome.error or f"refresh answered {outcome.status}"
@@ -813,7 +813,7 @@ class Adapter:
                 return _error(401, "refresh token required")
             service = self._proxy_authorization()
             outcome = self._refreshes.share(
-                f"bearer:{token}", lambda: self._rotate(forwarded, token, service)
+                f"bearer:{token}", lambda: self._rotate(forwarded, token, service), keep=False
             )
             if outcome.session is None:
                 if outcome.error is not None:

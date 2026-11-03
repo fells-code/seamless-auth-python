@@ -518,8 +518,11 @@ already guards.
 
 The adapter is synchronous and thread-safe: one `Adapter` serves the whole process. Under FastAPI
 the bindings run it on Starlette's threadpool, so it never blocks the event loop. Under Django it
-runs in the request thread, on WSGI or ASGI. Refresh sharing (one rotation per refresh token,
-handed to every parallel request for 5 seconds) works across threads.
+runs in the request thread, on WSGI or ASGI. Refresh sharing works across threads: requests that
+present one refresh token while its rotation runs share that rotation, in either transport. For
+cookie transport only, a request presenting the same refresh cookie within 5 seconds after gets
+the same rotated session, so several tabs with one expired session all succeed. A bearer client
+presenting a spent refresh token always reaches the auth API.
 
 ## The manifest
 
