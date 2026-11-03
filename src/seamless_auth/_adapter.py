@@ -497,6 +497,13 @@ class Adapter:
             return _error(401, f"Invalid or expired {name} cookie")
         return _error(401, f'Missing required cookie "{name}"')
 
+    def _unreadable_access_cookie(self, headers: Headers) -> bool:
+        name = self._config.access_cookie_name
+        return (
+            raw_cookie(headers, name) is not None
+            and read_cookie(self._config, headers, name, cookie_kind("access")) is None
+        )
+
     def _optional_pre_auth(self, headers: Headers, bearer: bool) -> str | None:
         if bearer:
             token = _bearer_token(headers)
@@ -841,8 +848,16 @@ class Adapter:
         ]
         credential = self._credential_for(headers, forwarded, "access", bearer)
         if isinstance(credential, _Reply):
-            credential.clear = clears
-            return credential
+            if not bearer and self._unreadable_access_cookie(headers):
+                # Credential resolution never refreshes past an access cookie that
+                # fails verification, so nothing told the auth API. Its /logout takes
+                # an access token only, so the refresh cookie is spent for one.
+                refreshed = self._silent_refresh(headers, forwarded)
+                if isinstance(refreshed, tuple):
+                    credential = (f"Bearer {str_claim(refreshed[0], 'token')}", [])
+            if isinstance(credential, _Reply):
+                credential.clear = clears
+                return credential
         try:
             res = self._call(
                 forwarded,
