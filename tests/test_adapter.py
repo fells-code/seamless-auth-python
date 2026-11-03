@@ -547,6 +547,24 @@ def test_bearer_transport_skips_the_origin_check(api: FakeApi) -> None:
         assert (r.status, r.body) == (403, {"error": "cross_site_request_blocked"})
 
 
+@pytest.mark.parametrize("headers", [{"sec-fetch-site": "cross-site"}, {"origin": "null"}])
+def test_bearer_transport_gets_the_origin_check(api: FakeApi, headers: dict[str, str]) -> None:
+    api.on("POST", "/recovery-codes", respond(200, {"ok": True}))
+    adapter = api.adapter()
+
+    r = call(
+        adapter,
+        "POST",
+        "/recovery-codes",
+        content_type=None,
+        headers={"x-seamless-auth-transport": "bearer", "authorization": "Bearer t", **headers},
+    )
+
+    assert (r.status, r.body) == (403, {"error": "cross_site_request_blocked"}), r.text
+    assert not r.cookies, "a bearer reply writes no cookies"
+    assert not api.calls_to("POST", "/recovery-codes")
+
+
 APP = "https://app.example"
 SIBLING = "https://evil.app.example"
 ORIGIN_CASES = [
