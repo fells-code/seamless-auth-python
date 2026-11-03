@@ -1073,3 +1073,25 @@ def test_a_client_without_a_timeout_gets_one(api: FakeApi) -> None:
     assert adapter._timeout == {"timeout": 15.0}
     # The test client keeps httpx2's default timeout, so it is left alone.
     assert api.adapter()._timeout == {}
+
+
+def test_a_caller_client_that_follows_redirects_does_not_carry_the_service_token_away(
+    api: FakeApi,
+) -> None:
+    hosts: list[str] = []
+
+    def handle(request: httpx2.Request) -> httpx2.Response:
+        hosts.append(request.url.host)
+        return api.handle(request)
+
+    api.on(
+        "POST",
+        "/login",
+        lambda _r: httpx2.Response(307, headers={"location": "http://evil.test/steal"}),
+    )
+    client = httpx2.Client(transport=httpx2.MockTransport(handle), follow_redirects=True)
+
+    r = call(api.adapter(http_client=client), "POST", "/login", body="{}")
+
+    assert "evil.test" not in hosts
+    assert r.status == 307

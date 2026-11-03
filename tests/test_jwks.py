@@ -93,3 +93,20 @@ def test_a_failed_fetch_releases_its_waiters() -> None:
             cache.key("k1")
     assert fetches == 1, "a second miss inside the backoff does not fetch again"
     assert cache._fetching is None
+
+
+def test_a_caller_client_that_follows_redirects_does_not_fetch_keys_elsewhere() -> None:
+    hosts: list[str] = []
+
+    def handle(request: httpx2.Request) -> httpx2.Response:
+        hosts.append(request.url.host)
+        if request.url.host == "evil.test":
+            return httpx2.Response(200, json=JWKS)
+        return httpx2.Response(302, headers={"location": "http://evil.test/jwks.json"})
+
+    client = httpx2.Client(transport=httpx2.MockTransport(handle), follow_redirects=True)
+    cache = JwksCache(JWKS_URL, client)
+
+    with pytest.raises(TokenError):
+        cache.verify(api_token("u1", "access"), API_URL, API_URL)
+    assert "evil.test" not in hosts
