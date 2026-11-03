@@ -138,12 +138,13 @@ A request the guard admits on the session cookie also gets the auth routes' cros
 methods other than `GET`, `HEAD` and `OPTIONS`, whatever the `same_site` setting (a sibling
 subdomain is same-site, so `SameSite=Lax` or `Strict` still sends it the cookies):
 
+- `Origin: null` (in any case, with any surrounding space) answers 403, checked first, whatever
+  `Sec-Fetch-Site` and `allowed_origins` say.
 - `Sec-Fetch-Site: cross-site` answers 403.
 - `Sec-Fetch-Site: same-origin` (or `none`) passes.
 - `Sec-Fetch-Site: same-site` also covers a sibling subdomain, and a request with no
-  `Sec-Fetch-Site` could come from anywhere, so for both the `Origin` decides. `Origin: null`
-  answers 403. When `allowed_origins` is set, the request must carry an `Origin` on that list, or
-  it answers 403. Without `allowed_origins` it passes, and on the auth routes the body rule below
+  `Sec-Fetch-Site` could come from anywhere, so for both the `Origin` decides. When
+  `allowed_origins` is set, the request must carry an `Origin` on that list, or it answers 403. Without `allowed_origins` it passes, and on the auth routes the body rule below
   is what stops a form.
 - A request with neither `Sec-Fetch-Site` nor `Origin` is not a browser form, so it passes, with
   or without `allowed_origins`. On the auth routes the body rule below still applies to it.
