@@ -611,6 +611,14 @@ ORIGIN_CASES = [
     ((), "None", "POST", None, None, False),
     ((), "None", "POST", "same-origin", None, False),
     ((), "None", "GET", "same-site", APP, False),
+    # Origin: null is refused first, whatever the fetch metadata or allowlist says.
+    (None, "None", "POST", "same-origin", "null", True),
+    (None, "None", "POST", "none", "null", True),
+    ((APP,), "None", "POST", "same-origin", "null", True),
+    (None, "Lax", "POST", "same-origin", " NULL ", True),
+    (None, "None", "POST", None, "Null", True),
+    (None, "None", "POST", "same-site", " null", True),
+    (None, "None", "GET", "same-origin", "null", False),
     # Neither normalizes to an origin, so neither can match the other.
     (("not an origin",), "None", "POST", "same-site", "also not one", True),
     (("not an origin",), "None", "POST", None, "also not one", True),
