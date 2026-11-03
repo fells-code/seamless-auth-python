@@ -184,13 +184,16 @@ def call(
     headers: dict[str, str] | None = None,
     peer: str | None = None,
 ) -> Reply:
-    """Sends a request to the adapter's auth routes. A body goes as JSON, as the
-    client SDKs send it, unless ``content_type`` says otherwise."""
+    """Sends a request to the adapter's auth routes. A body, or a state change with
+    none, goes as JSON, as the client SDKs send it, unless ``content_type`` or
+    ``headers`` say otherwise."""
     path, _, query = path.partition("?")
     items = list((headers or {}).items())
     if cookie:
         items.append(("cookie", cookie))
-    if body is not None and content_type:
+    unsafe = method.upper() not in ("GET", "HEAD", "OPTIONS")
+    named = any(k.lower() == "content-type" for k, _ in items)
+    if (body is not None or unsafe) and content_type and not named:
         items.append(("content-type", content_type))
     res = adapter.handle(
         AuthRequest(

@@ -34,7 +34,7 @@ dependencies = [
     # maintained continuation of httpx (Pydantic), which Starlette also moved to.
     "httpx2>=2.13,<3",
     # HS256 cookies and service tokens, RS256 verification against the API's JWKS.
-    "PyJWT[crypto]>=2.10,<3",
+    "PyJWT[crypto]>=2.10.1,<3",
 ]
 
 [project.optional-dependencies]

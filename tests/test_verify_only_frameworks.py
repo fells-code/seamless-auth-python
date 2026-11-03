@@ -25,7 +25,7 @@ from django.test import Client, override_settings
 from fastapi import Depends, FastAPI
 from fastapi.testclient import TestClient
 
-from seamless_auth import VerifiedUser, require_scope
+from seamless_auth import BearerRequest, VerifiedUser, require_scope
 from seamless_auth.django import _reset_resource_server
 from seamless_auth.fastapi import RequireBearer, add_bearer_error_handler
 
@@ -178,3 +178,37 @@ def test_fastapi_two_authorization_headers_are_no_token() -> None:
     r = TestClient(app).get("/x", headers=[("authorization", auth), ("authorization", auth)])
     assert r.status_code == 401
     assert r.json() == {"error": "missing_token"}
+
+
+def test_fastapi_confirm_hook_url_does_not_come_from_the_host_header() -> None:
+    seen: list[str] = []
+
+    def confirm(cnf: Any, request: BearerRequest | None) -> bool:
+        assert request is not None
+        seen.append(request.url)
+        return True
+
+    server = Provider().server(confirm=confirm)
+    app = FastAPI()
+
+    bearer = RequireBearer(server, base_url="https://api.example")
+
+    @app.get("/orders")
+    def orders(user: VerifiedUser = Depends(bearer)) -> dict[str, str]:  # noqa: B008
+        return {"sub": user.sub}
+
+    r = TestClient(app, base_url="http://evil.test").get(
+        "/orders?page=2",
+        headers={"authorization": f"Bearer {VECTORS['tokens']['cnf_bound']}", "host": "evil.test"},
+    )
+
+    assert r.status_code == 200
+    assert seen == ["https://api.example/orders?page=2"]
+
+
+@pytest.mark.parametrize(
+    "base_url", ["api.example", "ftp://api.example", "https://api.example/v1", "https://"]
+)
+def test_fastapi_base_url_must_be_an_origin(base_url: str) -> None:
+    with pytest.raises(ValueError, match="base_url"):
+        RequireBearer(Provider().server(), base_url=base_url)

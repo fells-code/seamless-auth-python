@@ -71,6 +71,7 @@ PROXY_REUSE = 45.0
 # recognises by that flow's pre-auth token. The token is optional: without it the
 # API asks for confirmation instead, so its absence is never a 401 here.
 _MAGIC_LINK_VERIFY = ("GET", "/magic-link/verify/{token}")
+_SAFE_METHODS = ("GET", "HEAD", "OPTIONS")
 
 # Enrolling a factor from a recovery session lifts the API's restriction on the
 # session, but the access token keeps its recovery claim until it is refreshed.
@@ -144,7 +145,7 @@ class Config:
     cookie_domain: str | None
     secure_cookies: bool
     same_site: str
-    allowed_origins: tuple[str, ...]
+    allowed_origins: tuple[str, ...] | None
     access_cookie_name: str
     registration_cookie_name: str
     refresh_cookie_name: str
@@ -196,7 +197,7 @@ class Adapter:
         cookie_domain: str | None = None,
         insecure_cookies: bool = False,
         same_site: str | None = None,
-        allowed_origins: Iterable[str] = (),
+        allowed_origins: Iterable[str] | None = None,
         access_cookie_name: str = "seamless-access",
         refresh_cookie_name: str = "seamless-refresh",
         # Shares the registration cookie on purpose: registration and sign-in never
@@ -265,14 +266,15 @@ class Adapter:
             cookie_domain=cookie_domain,
             secure_cookies=not insecure_cookies,
             same_site=same_site,
-            allowed_origins=tuple(allowed_origins),
+            allowed_origins=None if allowed_origins is None else tuple(allowed_origins),
             access_cookie_name=access_cookie_name,
             registration_cookie_name=registration_cookie_name,
             refresh_cookie_name=refresh_cookie_name,
             pre_auth_cookie_name=pre_auth_cookie_name,
         )
         # A client that follows redirects would carry the service token to wherever
-        # the auth API pointed it.
+        # the auth API pointed it, so every request also says not to: a supplied
+        # client may have been built to follow them.
         self._client = http_client or httpx2.Client(
             timeout=UPSTREAM_TIMEOUT, follow_redirects=False
         )
@@ -327,12 +329,11 @@ class Adapter:
 
     def _handle(self, request: AuthRequest) -> AuthResponse:
         bearer = (request.headers.get(TRANSPORT_HEADER) or "").lower() == "bearer"
-        # Bearer transport reads no cookies, so a cross-site request has nothing of the
-        # user's to ride on. A custom header also needs a CORS preflight to be sent.
-        if not bearer:
-            blocked = self._check_origin(request.method, request.headers)
-            if blocked is not None:
-                return self._write(blocked, bearer=False)
+        # Both transports, as the other adapters: a native bearer client sends
+        # neither fetch metadata nor an Origin, so it passes.
+        blocked = self._check_origin(request.method, request.headers)
+        if blocked is not None:
+            return self._write(blocked, bearer=bearer)
 
         forwarded = self._forwarded(request)
         method = request.method.upper()
@@ -429,7 +430,7 @@ class Adapter:
             request = self._client.build_request(
                 method, url, headers=headers, content=content, **self._timeout
             )
-            return self._client.send(request, stream=stream)
+            return self._client.send(request, stream=stream, follow_redirects=False)
         except (httpx2.HTTPError, httpx2.InvalidURL, UnicodeError, ValueError) as err:
             # The type only: the text of these holds the URL, and a path or query
             # can hold a magic-link token or an OAuth code.
@@ -496,6 +497,13 @@ class Adapter:
             return _error(401, f"Invalid or expired {name} cookie")
         return _error(401, f'Missing required cookie "{name}"')
 
+    def _unreadable_access_cookie(self, headers: Headers) -> bool:
+        name = self._config.access_cookie_name
+        return (
+            raw_cookie(headers, name) is not None
+            and read_cookie(self._config, headers, name, cookie_kind("access")) is None
+        )
+
     def _optional_pre_auth(self, headers: Headers, bearer: bool) -> str | None:
         if bearer:
             token = _bearer_token(headers)
@@ -532,8 +540,13 @@ class Adapter:
         body = request.body if request.body and request.body.strip() else None
         # The body goes upstream as JSON, so it has to be JSON. A cross-site form can
         # send a text/plain body shaped like JSON with no CORS preflight; read as
-        # JSON, that would be a sign-in the victim never made.
-        if body is not None and not _is_explicit_json(request.headers.get("content-type")):
+        # JSON, that would be a sign-in the victim never made. A state change with no
+        # body needs a JSON content type or the transport header all the same: either
+        # one forces a preflight, which a form on a sibling subdomain cannot pass.
+        if route.method not in _SAFE_METHODS and not (
+            _is_explicit_json(request.headers.get("content-type"))
+            or (body is None and request.headers.get(TRANSPORT_HEADER) is not None)
+        ):
             return _error(415, "unsupported_media_type")
 
         authorization: str | None
@@ -726,7 +739,7 @@ class Adapter:
             return issued
         service = self._sign_service(sub, {"refreshToken": refresh_token})
         outcome = self._refreshes.share(
-            key, lambda: self._rotate(forwarded, refresh_token, service)
+            key, lambda: self._rotate(forwarded, refresh_token, service), keep=True
         )
         if outcome.session is None:
             log.debug("[seamless-auth] Refresh after enrollment failed")
@@ -782,7 +795,7 @@ class Adapter:
         service = self._sign_service(str_claim(payload, "sub"), {"refreshToken": refresh_token})
 
         outcome = self._refreshes.share(
-            f"cookie:{raw}", lambda: self._rotate(forwarded, refresh_token, service)
+            f"cookie:{raw}", lambda: self._rotate(forwarded, refresh_token, service), keep=True
         )
         if outcome.session is None:
             return outcome.error or f"refresh answered {outcome.status}"
@@ -800,7 +813,7 @@ class Adapter:
                 return _error(401, "refresh token required")
             service = self._proxy_authorization()
             outcome = self._refreshes.share(
-                f"bearer:{token}", lambda: self._rotate(forwarded, token, service)
+                f"bearer:{token}", lambda: self._rotate(forwarded, token, service), keep=False
             )
             if outcome.session is None:
                 if outcome.error is not None:
@@ -835,8 +848,16 @@ class Adapter:
         ]
         credential = self._credential_for(headers, forwarded, "access", bearer)
         if isinstance(credential, _Reply):
-            credential.clear = clears
-            return credential
+            if not bearer and self._unreadable_access_cookie(headers):
+                # Credential resolution never refreshes past an access cookie that
+                # fails verification, so nothing told the auth API. Its /logout takes
+                # an access token only, so the refresh cookie is spent for one.
+                refreshed = self._silent_refresh(headers, forwarded)
+                if isinstance(refreshed, tuple):
+                    credential = (f"Bearer {str_claim(refreshed[0], 'token')}", [])
+            if isinstance(credential, _Reply):
+                credential.clear = clears
+                return credential
         try:
             res = self._call(
                 forwarded,
@@ -957,32 +978,30 @@ class Adapter:
         return claims
 
     def _check_origin(self, method: str, headers: Headers) -> _Reply | None:
-        """Blocks cross-site state changes while cookies are SameSite=None, which is
-        when the browser would otherwise attach them to such a request."""
-        if self._config.same_site != "None":
-            return None
-        if method.upper() in ("GET", "HEAD", "OPTIONS"):
+        """Blocks cross-site state changes, whatever the SameSite setting: a sibling
+        subdomain is same-site, so SameSite=Lax or Strict still sends it the cookies."""
+        if method.upper() in _SAFE_METHODS:
             return None
         blocked = _error(403, "cross_site_request_blocked")
 
+        # An opaque origin (a sandboxed frame, a data: URL) is refused before
+        # anything else, whatever the fetch metadata says.
         origin = headers.get("origin")
-        site = headers.get("sec-fetch-site")
-        if site is not None:
-            site = site.lower()
-            if site == "cross-site":
-                return blocked
-            # same-site also covers a sibling subdomain, so an adopter who listed
-            # allowed origins gets the Origin held to that list.
-            if site != "same-site" or not self._config.allowed_origins:
-                return None
-            return None if origin is not None and self._is_allowed_origin(origin) else blocked
-        if origin is None:
-            return None
-        if origin == "null":
+        if origin is not None and origin.strip().lower() == "null":
             return blocked
-        if not self._config.allowed_origins:
+        site = (headers.get("sec-fetch-site") or "").lower()
+        if site == "cross-site":
+            return blocked
+        if site in ("same-origin", "none"):
             return None
-        return None if self._is_allowed_origin(origin) else blocked
+        # same-site also covers a sibling subdomain, and a request with no fetch
+        # metadata could come from anywhere, so the Origin is what decides. With
+        # neither header it is no browser form, and the body gate still applies.
+        if origin is None and not site:
+            return None
+        if self._config.allowed_origins is None:
+            return None
+        return None if origin is not None and self._is_allowed_origin(origin) else blocked
 
     def _is_allowed_origin(self, origin: str) -> bool:
         normalized = _normalize_origin(origin)
@@ -990,7 +1009,8 @@ class Adapter:
         if not normalized:
             return False
         return any(
-            _normalize_origin(allowed) == normalized for allowed in self._config.allowed_origins
+            _normalize_origin(allowed) == normalized
+            for allowed in self._config.allowed_origins or ()
         )
 
 

@@ -37,7 +37,7 @@ Verify-only, for an API that only receives OpenID Provider access tokens::
 from __future__ import annotations
 
 from collections.abc import Iterable
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 from fastapi import APIRouter, FastAPI, HTTPException, Request
 from starlette.background import BackgroundTask
@@ -187,18 +187,49 @@ class RequireBearer:
     With ``allow_clients=False`` a client credentials token is refused with 403
     ``user_required``, before the guards run.
 
+    ``base_url`` is this API's public origin, such as ``https://api.example.com``.
+    The ``confirm`` hook's URL (a DPoP proof's ``htu``) takes its scheme and host
+    from it rather than from the request, whose ``Host`` header the client chooses.
+    Without it the URL is Starlette's, so put ``TrustedHostMiddleware`` (and, behind
+    a proxy, trusted forwarded headers) in front of the app.
+
     A plain function, so FastAPI runs it on its threadpool: the first request may
     fetch the provider's discovery document and key set.
     """
 
-    def __init__(self, server: ResourceServer, *guards: Guard, allow_clients: bool = True) -> None:
+    def __init__(
+        self,
+        server: ResourceServer,
+        *guards: Guard,
+        allow_clients: bool = True,
+        base_url: str | None = None,
+    ) -> None:
         self._server = server
         self._guards = guards
         self._allow_clients = allow_clients
+        self._origin: tuple[str, str] | None = None
+        if base_url is not None:
+            parts = urlsplit(base_url) if isinstance(base_url, str) else None
+            if (
+                parts is None
+                or parts.scheme not in ("http", "https")
+                or not parts.netloc
+                or parts.path not in ("", "/")
+                or parts.query
+                or parts.fragment
+            ):
+                raise ValueError("seamless-auth: base_url must be an http(s) origin")
+            self._origin = (parts.scheme, parts.netloc)
+
+    def _url(self, request: Request) -> str:
+        if self._origin is None:
+            return str(request.url)
+        scheme, netloc = self._origin
+        return str(request.url.replace(scheme=scheme, netloc=netloc))
 
     def __call__(self, request: Request) -> VerifiedUser:
         values = request.headers.getlist("authorization")
-        bearer = BearerRequest(request.method, _headers(request), lambda: str(request.url))
+        bearer = BearerRequest(request.method, _headers(request), lambda: self._url(request))
         try:
             # More than one Authorization header is not one token.
             user = self._server.authenticate(

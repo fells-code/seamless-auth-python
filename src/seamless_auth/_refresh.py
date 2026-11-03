@@ -1,5 +1,5 @@
-"""Refresh sharing: one rotation per refresh token, handed to every caller
-presenting it for a few seconds."""
+"""Refresh sharing: one rotation per refresh token at a time, and for cookie
+transport, handed to later callers presenting it for a few seconds."""
 
 from __future__ import annotations
 
@@ -12,9 +12,10 @@ from typing import Any
 
 from ._jwt import Claims
 
-# A refresh token presented again within this window gets the rotation it already
+# A refresh cookie presented again within this window gets the rotation it already
 # got, so parallel requests from several tabs with one expired session all succeed
-# instead of tripping the auth API's reuse detection.
+# instead of tripping the auth API's reuse detection. Bearer callers never get it: a
+# bearer client replaying a spent token goes to the API, which revokes the family.
 REUSE_WINDOW = 5.0
 # How long a caller waits on another's rotation before giving up.
 FLIGHT_TIMEOUT = 30.0
@@ -43,10 +44,14 @@ class Refresher:
         self._flights: dict[str, _Flight] = {}
         self._ids = itertools.count(1)
 
-    def share(self, key: str, rotate: Callable[[], RefreshOutcome]) -> RefreshOutcome:
-        """Runs ``rotate`` once per key at a time, and hands a successful outcome
-        to every caller with the same key for the reuse window afterwards. A
-        failure is not kept, so each later caller sees it from the auth API itself."""
+    def share(
+        self, key: str, rotate: Callable[[], RefreshOutcome], *, keep: bool
+    ) -> RefreshOutcome:
+        """Runs ``rotate`` once per key at a time, handing its outcome to every
+        caller that arrives while it runs. With ``keep`` (cookie transport) a
+        successful outcome also goes to callers with the same key for the reuse
+        window afterwards. A failure is never kept, so each later caller sees it
+        from the auth API itself."""
         with self._lock:
             now = time.monotonic()
             for stale in [
@@ -72,7 +77,7 @@ class Refresher:
         finally:
             with self._lock:
                 if self._flights.get(key) is flight:
-                    if outcome.session is not None:
+                    if keep and outcome.session is not None:
                         flight.finished = time.monotonic()
                     else:
                         del self._flights[key]
