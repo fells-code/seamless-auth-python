@@ -385,6 +385,8 @@ def test_the_guard_checks_the_origin_whatever_the_same_site_setting(
     with pytest.raises(CrossSiteRequest):
         post(("origin", "https://evil.app.example"))
     assert post(("sec-fetch-site", "same-site"), ("origin", "https://app.example")) == "u1"
+    # Neither header: not a browser form.
+    assert post() == "u1"
 
 
 ROLE_CASES = [

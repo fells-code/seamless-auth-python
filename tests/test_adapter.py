@@ -571,8 +571,9 @@ ORIGIN_CASES = [
     ((APP,), "Strict", "POST", "same-site", APP, False),
     ((APP,), "None", "POST", None, APP, False),
     ((APP,), "None", "POST", None, "https://evil.example", True),
-    # With no fetch metadata the Origin is all there is to hold to the list.
-    ((APP,), "None", "POST", None, None, True),
+    # Neither header is no browser form, so it passes; the body gate still applies.
+    ((APP,), "None", "POST", None, None, False),
+    ((APP,), "Lax", "POST", None, None, False),
     # A sibling subdomain is same-site, so the header alone cannot tell it from the app.
     ((APP,), "None", "POST", "same-site", "https://evil.example", True),
     ((APP,), "None", "POST", "same-site", None, True),
@@ -589,7 +590,7 @@ ORIGIN_CASES = [
     ((), "None", "POST", "same-site", APP, True),
     ((), "Lax", "POST", "same-site", APP, True),
     ((), "None", "POST", None, APP, True),
-    ((), "None", "POST", None, None, True),
+    ((), "None", "POST", None, None, False),
     ((), "None", "POST", "same-origin", None, False),
     ((), "None", "GET", "same-site", APP, False),
     # Neither normalizes to an origin, so neither can match the other.
@@ -663,9 +664,10 @@ def test_refresh_and_logout_get_the_origin_check_and_keep_the_cookies(
         assert not r.cookies, "a refused request must not clear the session"
     assert not api.calls_to(method, path)
 
-    # Exempt from the content-type gate: the client sends these with no body.
+    # Exempt from the content-type gate: the client sends these with no body. With
+    # neither fetch metadata nor an Origin it passes the origin check too.
     r = call(adapter, method, path, content_type=None, cookie=REFRESH)
-    assert r.status != 415, r.text
+    assert r.status not in (403, 415), r.text
 
 
 def test_a_state_change_with_no_body_needs_json_or_the_transport_header(api: FakeApi) -> None:
@@ -676,6 +678,11 @@ def test_a_state_change_with_no_body_needs_json_or_the_transport_header(api: Fak
     for content_type in (None, "text/plain", "application/x-www-form-urlencoded"):
         r = call(adapter, "POST", "/recovery-codes", content_type=content_type, cookie=access())
         assert (r.status, r.body) == (415, {"error": "unsupported_media_type"}), content_type
+    assert not api.calls_to("POST", "/recovery-codes")
+    # Passing the origin check with neither header does not skip the body gate.
+    strict = api.adapter(allowed_origins=[APP])
+    r = call(strict, "POST", "/recovery-codes", content_type=None, cookie=access())
+    assert r.status == 415
     assert not api.calls_to("POST", "/recovery-codes")
 
     assert call(adapter, "POST", "/recovery-codes", cookie=access()).status == 200

@@ -975,10 +975,13 @@ class Adapter:
         if site in ("same-origin", "none"):
             return None
         # same-site also covers a sibling subdomain, and a request with no fetch
-        # metadata could come from anywhere, so the Origin is what decides.
+        # metadata could come from anywhere, so the Origin is what decides. With
+        # neither header it is no browser form, and the body gate still applies.
         origin = headers.get("origin")
         if origin == "null":
             return blocked
+        if origin is None and not site:
+            return None
         if self._config.allowed_origins is None:
             return None
         return None if origin is not None and self._is_allowed_origin(origin) else blocked

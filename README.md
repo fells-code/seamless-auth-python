@@ -145,7 +145,10 @@ subdomain is same-site, so `SameSite=Lax` or `Strict` still sends it the cookies
   answers 403. When `allowed_origins` is set, the request must carry an `Origin` on that list, or
   it answers 403. Without `allowed_origins` it passes, and on the auth routes the body rule below
   is what stops a form.
-- `allowed_origins=[]` is strict: no `Origin` is on it, so only same-origin requests pass.
+- A request with neither `Sec-Fetch-Site` nor `Origin` is not a browser form, so it passes, with
+  or without `allowed_origins`. On the auth routes the body rule below still applies to it.
+- `allowed_origins=[]` is strict: no `Origin` is on it, so a same-site request, or one with an
+  `Origin` and no `Sec-Fetch-Site`, answers 403.
 
 A bearer token is never attached by a browser, so it is not checked. For the same reason the auth
 routes skip the check on a bearer-transport request (`x-seamless-auth-transport: bearer`), which
