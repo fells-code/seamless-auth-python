@@ -91,5 +91,14 @@ def guard_of(spec: dict[str, Any] | None) -> list[Guard]:
     ]
 
 
+def allow_clients_of(vector: dict[str, Any]) -> bool:
+    allow: bool = vector.get("auth", {}).get("allow_clients", True)
+    return allow
+
+
+#: Every request vector: the plain ones, then those with auth options.
+ALL_REQUESTS: list[dict[str, Any]] = [*VECTORS["requests"], *VECTORS["user_required_requests"]]
+
+
 def request_ids() -> list[str]:
-    return [r["name"] for r in VECTORS["requests"]]
+    return [r["name"] for r in ALL_REQUESTS]

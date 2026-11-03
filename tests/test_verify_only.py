@@ -33,13 +33,49 @@ def test_verify_vectors(vector: dict[str, Any]) -> None:
     server = Provider().server(jwks_uri=JWKS_URI)
     token = TOKENS[vector["name"]]
     if vector["valid"]:
-        assert user_fields(server.verify(token)) == vector["user"]
+        user = server.verify(token)
+        assert user_fields(user) == vector["user"]
+        assert user.is_client is vector["is_client"]
     else:
         with pytest.raises(BearerError) as err:
             server.verify(token)
         assert err.value.status == 401
         assert err.value.body == {"error": "invalid_token"}
         assert err.value.www_authenticate == 'Bearer error="invalid_token"'
+
+
+def test_a_client_credentials_token_is_a_client() -> None:
+    server = Provider().server(jwks_uri=JWKS_URI)
+    assert server.verify(TOKENS["client_credentials"]).is_client is True
+    assert server.verify(TOKENS["user_passkey"]).is_client is False
+    assert _user(sub="svc", client_id="svc").is_client is True
+
+
+def test_authenticate_lets_clients_through_by_default() -> None:
+    server = Provider().server(jwks_uri=JWKS_URI)
+    user = server.authenticate(f"Bearer {TOKENS['client_credentials']}")
+    assert user.is_client is True
+
+
+def test_authenticate_can_require_a_user() -> None:
+    server = Provider().server(jwks_uri=JWKS_URI)
+    with pytest.raises(BearerError) as err:
+        server.authenticate(f"Bearer {TOKENS['client_credentials']}", allow_clients=False)
+    assert err.value.status == 403
+    assert err.value.body == {"error": "user_required"}
+    assert err.value.headers() == {}
+    user = server.authenticate(f"Bearer {TOKENS['user_passkey']}", allow_clients=False)
+    assert user.sub == "user-123"
+
+
+def test_requiring_a_user_checks_the_token_first() -> None:
+    server = Provider().server(jwks_uri=JWKS_URI)
+    with pytest.raises(BearerError) as missing:
+        server.authenticate(None, allow_clients=False)
+    assert missing.value.error == "missing_token"
+    with pytest.raises(BearerError) as invalid:
+        server.authenticate(f"Bearer {TOKENS['wrong_aud']}", allow_clients=False)
+    assert invalid.value.error == "invalid_token"
 
 
 def test_every_token_has_a_verify_vector() -> None:
