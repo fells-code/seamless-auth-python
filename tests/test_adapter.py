@@ -551,19 +551,28 @@ APP = "https://app.example"
 SIBLING = "https://evil.app.example"
 ORIGIN_CASES = [
     # (allowlist, same_site, method, sec-fetch-site, origin, blocked)
-    ((), "None", "POST", "cross-site", None, True),
-    ((), "None", "POST", "same-origin", None, False),
-    ((), "None", "POST", "same-site", None, False),
-    ((), "None", "POST", "same-site", "https://evil.example", False),
-    ((), "None", "POST", None, None, False),
-    ((), "None", "POST", None, "null", True),
-    ((), "None", "POST", None, "https://evil.example", False),
-    ((), "None", "GET", "cross-site", None, False),
-    ((), "None", "OPTIONS", "cross-site", None, False),
-    ((), "Lax", "POST", "cross-site", None, False),
-    ((APP,), "Lax", "POST", "same-site", "https://evil.example", False),
+    (None, "None", "POST", "cross-site", None, True),
+    (None, "None", "POST", "same-origin", None, False),
+    # Without an allowlist the body gate is what stops a sibling's form.
+    (None, "None", "POST", "same-site", None, False),
+    (None, "None", "POST", "same-site", "https://evil.example", False),
+    (None, "None", "POST", "same-site", "null", True),
+    (None, "None", "POST", None, None, False),
+    (None, "None", "POST", None, "null", True),
+    (None, "None", "POST", None, "https://evil.example", False),
+    (None, "None", "GET", "cross-site", None, False),
+    (None, "None", "OPTIONS", "cross-site", None, False),
+    # Whatever the SameSite setting.
+    (None, "Lax", "POST", "cross-site", None, True),
+    (None, "Strict", "POST", "cross-site", None, True),
+    (None, "Lax", "POST", None, "null", True),
+    ((APP,), "Lax", "POST", "same-site", "https://evil.example", True),
+    ((APP,), "Lax", "POST", None, "https://evil.example", True),
+    ((APP,), "Strict", "POST", "same-site", APP, False),
     ((APP,), "None", "POST", None, APP, False),
     ((APP,), "None", "POST", None, "https://evil.example", True),
+    # With no fetch metadata the Origin is all there is to hold to the list.
+    ((APP,), "None", "POST", None, None, True),
     # A sibling subdomain is same-site, so the header alone cannot tell it from the app.
     ((APP,), "None", "POST", "same-site", "https://evil.example", True),
     ((APP,), "None", "POST", "same-site", None, True),
@@ -576,6 +585,13 @@ ORIGIN_CASES = [
     ((APP,), "None", "POST", "cross-site", APP, True),
     ((APP,), "None", "POST", "Cross-Site", APP, True),
     ((APP,), "None", "GET", "same-site", "https://evil.example", False),
+    # A configured empty allowlist is strict: only same-origin requests pass.
+    ((), "None", "POST", "same-site", APP, True),
+    ((), "Lax", "POST", "same-site", APP, True),
+    ((), "None", "POST", None, APP, True),
+    ((), "None", "POST", None, None, True),
+    ((), "None", "POST", "same-origin", None, False),
+    ((), "None", "GET", "same-site", APP, False),
     # Neither normalizes to an origin, so neither can match the other.
     (("not an origin",), "None", "POST", "same-site", "also not one", True),
     (("not an origin",), "None", "POST", None, "also not one", True),
@@ -583,7 +599,7 @@ ORIGIN_CASES = [
 ]
 
 
-OriginCase = tuple[tuple[str, ...], str, str, str | None, str | None, bool]
+OriginCase = tuple[tuple[str, ...] | None, str, str, str | None, str | None, bool]
 
 
 @pytest.mark.parametrize("case", ORIGIN_CASES)
@@ -624,6 +640,42 @@ def test_a_body_less_form_post_does_not_reach_a_cookie_route(
 
     assert r.status in (403, 415), r.text
     assert not api.calls_to("POST", path)
+
+
+def test_a_state_change_with_no_body_needs_json_or_the_transport_header(api: FakeApi) -> None:
+    api.on("POST", "/recovery-codes", respond(200, {"ok": True}))
+    api.on("GET", "/recovery-codes", respond(200, {"ok": True}))
+    adapter = api.adapter()
+
+    for content_type in (None, "text/plain", "application/x-www-form-urlencoded"):
+        r = call(adapter, "POST", "/recovery-codes", content_type=content_type, cookie=access())
+        assert (r.status, r.body) == (415, {"error": "unsupported_media_type"}), content_type
+    assert not api.calls_to("POST", "/recovery-codes")
+
+    assert call(adapter, "POST", "/recovery-codes", cookie=access()).status == 200
+    for transport in ("cookie", "bearer"):
+        r = call(
+            adapter,
+            "POST",
+            "/recovery-codes",
+            content_type=None,
+            cookie=access(),
+            headers={"x-seamless-auth-transport": transport, "authorization": "Bearer t"},
+        )
+        assert r.status == 200, (transport, r.text)
+    # The header stands in for a content type only when there is no body to read.
+    r = call(
+        adapter,
+        "POST",
+        "/recovery-codes",
+        body="{}",
+        content_type="text/plain",
+        cookie=access(),
+        headers={"x-seamless-auth-transport": "cookie"},
+    )
+    assert r.status == 415
+    r = call(adapter, "GET", "/recovery-codes", content_type=None, cookie=access())
+    assert r.status == 200
 
 
 @pytest.mark.parametrize("site", ["same-site", None, "cross-site"])

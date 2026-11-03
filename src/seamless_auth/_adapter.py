@@ -71,6 +71,7 @@ PROXY_REUSE = 45.0
 # recognises by that flow's pre-auth token. The token is optional: without it the
 # API asks for confirmation instead, so its absence is never a 401 here.
 _MAGIC_LINK_VERIFY = ("GET", "/magic-link/verify/{token}")
+_SAFE_METHODS = ("GET", "HEAD", "OPTIONS")
 
 # Enrolling a factor from a recovery session lifts the API's restriction on the
 # session, but the access token keeps its recovery claim until it is refreshed.
@@ -144,7 +145,7 @@ class Config:
     cookie_domain: str | None
     secure_cookies: bool
     same_site: str
-    allowed_origins: tuple[str, ...]
+    allowed_origins: tuple[str, ...] | None
     access_cookie_name: str
     registration_cookie_name: str
     refresh_cookie_name: str
@@ -196,7 +197,7 @@ class Adapter:
         cookie_domain: str | None = None,
         insecure_cookies: bool = False,
         same_site: str | None = None,
-        allowed_origins: Iterable[str] = (),
+        allowed_origins: Iterable[str] | None = None,
         access_cookie_name: str = "seamless-access",
         refresh_cookie_name: str = "seamless-refresh",
         # Shares the registration cookie on purpose: registration and sign-in never
@@ -265,7 +266,7 @@ class Adapter:
             cookie_domain=cookie_domain,
             secure_cookies=not insecure_cookies,
             same_site=same_site,
-            allowed_origins=tuple(allowed_origins),
+            allowed_origins=None if allowed_origins is None else tuple(allowed_origins),
             access_cookie_name=access_cookie_name,
             registration_cookie_name=registration_cookie_name,
             refresh_cookie_name=refresh_cookie_name,
@@ -532,8 +533,13 @@ class Adapter:
         body = request.body if request.body and request.body.strip() else None
         # The body goes upstream as JSON, so it has to be JSON. A cross-site form can
         # send a text/plain body shaped like JSON with no CORS preflight; read as
-        # JSON, that would be a sign-in the victim never made.
-        if body is not None and not _is_explicit_json(request.headers.get("content-type")):
+        # JSON, that would be a sign-in the victim never made. A state change with no
+        # body needs a JSON content type or the transport header all the same: either
+        # one forces a preflight, which a form on a sibling subdomain cannot pass.
+        if route.method not in _SAFE_METHODS and not (
+            _is_explicit_json(request.headers.get("content-type"))
+            or (body is None and request.headers.get(TRANSPORT_HEADER) is not None)
+        ):
             return _error(415, "unsupported_media_type")
 
         authorization: str | None
@@ -957,32 +963,25 @@ class Adapter:
         return claims
 
     def _check_origin(self, method: str, headers: Headers) -> _Reply | None:
-        """Blocks cross-site state changes while cookies are SameSite=None, which is
-        when the browser would otherwise attach them to such a request."""
-        if self._config.same_site != "None":
-            return None
-        if method.upper() in ("GET", "HEAD", "OPTIONS"):
+        """Blocks cross-site state changes, whatever the SameSite setting: a sibling
+        subdomain is same-site, so SameSite=Lax or Strict still sends it the cookies."""
+        if method.upper() in _SAFE_METHODS:
             return None
         blocked = _error(403, "cross_site_request_blocked")
 
-        origin = headers.get("origin")
-        site = headers.get("sec-fetch-site")
-        if site is not None:
-            site = site.lower()
-            if site == "cross-site":
-                return blocked
-            # same-site also covers a sibling subdomain, so an adopter who listed
-            # allowed origins gets the Origin held to that list.
-            if site != "same-site" or not self._config.allowed_origins:
-                return None
-            return None if origin is not None and self._is_allowed_origin(origin) else blocked
-        if origin is None:
+        site = (headers.get("sec-fetch-site") or "").lower()
+        if site == "cross-site":
+            return blocked
+        if site in ("same-origin", "none"):
             return None
+        # same-site also covers a sibling subdomain, and a request with no fetch
+        # metadata could come from anywhere, so the Origin is what decides.
+        origin = headers.get("origin")
         if origin == "null":
             return blocked
-        if not self._config.allowed_origins:
+        if self._config.allowed_origins is None:
             return None
-        return None if self._is_allowed_origin(origin) else blocked
+        return None if origin is not None and self._is_allowed_origin(origin) else blocked
 
     def _is_allowed_origin(self, origin: str) -> bool:
         normalized = _normalize_origin(origin)
@@ -990,7 +989,8 @@ class Adapter:
         if not normalized:
             return False
         return any(
-            _normalize_origin(allowed) == normalized for allowed in self._config.allowed_origins
+            _normalize_origin(allowed) == normalized
+            for allowed in self._config.allowed_origins or ()
         )
 
 

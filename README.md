@@ -134,16 +134,18 @@ and audience, in date, `typ: access`, and the same `sub` as the cookie. `User.ro
 claims of its own even if the cookie secret leaks. The first request with a new key fetches the key
 set, and when it cannot be fetched the guard answers 401.
 
-A request the guard admits on the session cookie also gets the auth routes' cross-site check,
-while cookies are `SameSite=None` and only for methods other than `GET`, `HEAD` and `OPTIONS`:
+A request the guard admits on the session cookie also gets the auth routes' cross-site check, for
+methods other than `GET`, `HEAD` and `OPTIONS`, whatever the `same_site` setting (a sibling
+subdomain is same-site, so `SameSite=Lax` or `Strict` still sends it the cookies):
 
 - `Sec-Fetch-Site: cross-site` answers 403.
-- `Sec-Fetch-Site: same-site` also covers a sibling subdomain, so when `allowed_origins` is set the
-  request must carry an `Origin` on that list, or it answers 403. Without `allowed_origins` it
-  passes.
 - `Sec-Fetch-Site: same-origin` (or `none`) passes.
-- With no `Sec-Fetch-Site`, an `Origin: null` answers 403, and when `allowed_origins` is set any
-  other `Origin` must be on it. A request with neither header passes.
+- `Sec-Fetch-Site: same-site` also covers a sibling subdomain, and a request with no
+  `Sec-Fetch-Site` could come from anywhere, so for both the `Origin` decides. `Origin: null`
+  answers 403. When `allowed_origins` is set, the request must carry an `Origin` on that list, or
+  it answers 403. Without `allowed_origins` it passes, and on the auth routes the body rule below
+  is what stops a form.
+- `allowed_origins=[]` is strict: no `Origin` is on it, so only same-origin requests pass.
 
 A bearer token is never attached by a browser, so it is not checked. For the same reason the auth
 routes skip the check on a bearer-transport request (`x-seamless-auth-transport: bearer`), which
@@ -200,7 +202,12 @@ refresh token, so it calls `POST /auth/refresh` itself after enrolling.
 The auth routes forward a request body to the auth API as JSON, so a body must be sent as
 `application/json` (or a `+json` type). Anything else answers 415 `unsupported_media_type`: a
 cross-site form can post a `text/plain` body shaped like JSON with no CORS preflight, and read as
-JSON it would be a sign-in the user never made. The client SDKs already send JSON.
+JSON it would be a sign-in the user never made.
+
+A state change on an auth route (any method but `GET`, `HEAD` and `OPTIONS`) needs that content
+type even with no body, or else an `x-seamless-auth-transport` header (`cookie` or `bearer`).
+Either one forces a CORS preflight, which a form on a sibling subdomain cannot send, so a body-less
+form post answers 415 too. `POST /auth/refresh` and `DELETE /auth/logout` are exempt.
 
 ## Options
 
@@ -215,7 +222,7 @@ JSON it would be a sign-in the user never made. The client SDKs already send JSO
 | `cookie_domain` | none | Cookie `Domain` |
 | `insecure_cookies` | `False` | Drops `Secure`, and allows placeholder secrets, for local development over HTTP |
 | `same_site` | `None`, or `Lax` with `insecure_cookies` | Cookie `SameSite` |
-| `allowed_origins` | none | The only cross-origin callers allowed to change state while cookies are `SameSite=None` |
+| `allowed_origins` | none | The only origins allowed to change state from a same-site page or without fetch metadata; `[]` allows none |
 | `access_cookie_name`, `refresh_cookie_name` | `seamless-access`, `seamless-refresh` | Session cookie names |
 | `registration_cookie_name`, `pre_auth_cookie_name` | `seamless-ephemeral` | Sign-in flow cookie names |
 | `deliver` | none | Sends OTP codes and magic links through your own transports |
