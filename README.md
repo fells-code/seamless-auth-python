@@ -395,7 +395,8 @@ def refund_order(id: str, user: VerifiedUser = Depends(refund)): ...
 ```
 
 `RequireBearer(rs, *guards)` verifies the token, runs the guards in order, and returns the
-`VerifiedUser`. `add_bearer_error_handler(app)` answers refusals with the JSON bodies below; without
+`VerifiedUser`. `RequireBearer(rs, *guards, allow_clients=False)` also refuses a client credentials
+token (below). `add_bearer_error_handler(app)` answers refusals with the JSON bodies below; without
 it FastAPI still sends the status and `WWW-Authenticate`, with the body under `detail`.
 
 ### Django
@@ -427,8 +428,9 @@ def refund(request, id): ...
 ```
 
 `SEAMLESS_RESOURCE_SERVER` takes the keyword arguments of `ResourceServer`; `confirm` may be a
-dotted path. `@require_bearer` (or `@require_bearer(server=rs)`) verifies the token and puts the
-`VerifiedUser` on the request; the guard decorators go beneath it and run top to bottom. A guard
+dotted path. `@require_bearer` (or `@require_bearer(server=rs)`, or
+`@require_bearer(allow_clients=False)`) verifies the token and puts the `VerifiedUser` on the
+request; the guard decorators go beneath it and run top to bottom. A guard
 with no `@require_bearer` above it answers as if there were no token. All of them work on sync and
 async views.
 
@@ -455,9 +457,19 @@ as the adapter caches the auth API's: a new `kid` refetches it at most every 30 
 fetched again after 10 minutes.
 
 `VerifiedUser` carries `sub`, `client_id`, `scopes` (the `scope` claim split on spaces), `roles`,
-`sid`, `org_id`, `acr`, `amr`, `auth_time`, `exp`, `iat`, the raw `token` and every `claims`. A
-client credentials token (`sub == client_id`, no user claims) is valid, and fails role and step-up
-guards.
+`sid`, `org_id`, `acr`, `amr`, `auth_time`, `exp`, `iat`, the raw `token` and every `claims`.
+`is_client` is true for a client credentials token (`sub == client_id`): a machine acting for
+itself, with no user behind it, so `sub` is a client id. Such a token is valid, and fails role and
+step-up guards.
+
+### Requiring a user
+
+An endpoint that only makes sense for a person (their profile, their orders) can refuse client
+credentials tokens outright with `allow_clients=False` on `RequireBearer`, `@require_bearer` or
+`ResourceServer.authenticate`. The default, `True`, lets them through. After the token verifies, a
+client token answers 403 `{"error":"user_required"}` with no `WWW-Authenticate`, as an
+insufficient role does. A missing or invalid token still answers 401 first, and the scope, role and
+step-up guards run after.
 
 ### Guards
 

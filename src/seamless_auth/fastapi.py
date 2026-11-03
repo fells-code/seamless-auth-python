@@ -184,20 +184,28 @@ class RequireBearer:
     """A dependency that verifies the request's OpenID Provider access token, runs
     ``guards`` in order, and returns the :class:`~seamless_auth.VerifiedUser`.
 
+    With ``allow_clients=False`` a client credentials token is refused with 403
+    ``user_required``, before the guards run.
+
     A plain function, so FastAPI runs it on its threadpool: the first request may
     fetch the provider's discovery document and key set.
     """
 
-    def __init__(self, server: ResourceServer, *guards: Guard) -> None:
+    def __init__(self, server: ResourceServer, *guards: Guard, allow_clients: bool = True) -> None:
         self._server = server
         self._guards = guards
+        self._allow_clients = allow_clients
 
     def __call__(self, request: Request) -> VerifiedUser:
         values = request.headers.getlist("authorization")
         bearer = BearerRequest(request.method, _headers(request), lambda: str(request.url))
         try:
             # More than one Authorization header is not one token.
-            user = self._server.authenticate(values[0] if len(values) == 1 else None, bearer)
+            user = self._server.authenticate(
+                values[0] if len(values) == 1 else None,
+                bearer,
+                allow_clients=self._allow_clients,
+            )
             for guard in self._guards:
                 guard.check(user)
         except BearerError as err:

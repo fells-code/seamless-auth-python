@@ -253,13 +253,18 @@ def _guard(view: F, allow_recovery: bool, roles: tuple[str, ...] | None) -> F:
 @overload
 def require_bearer(view: F) -> F: ...
 @overload
-def require_bearer(*, server: ResourceServer | None = None) -> Callable[[F], F]: ...
+def require_bearer(
+    *, server: ResourceServer | None = None, allow_clients: bool = True
+) -> Callable[[F], F]: ...
 
 
-def require_bearer(view: F | None = None, *, server: ResourceServer | None = None) -> Any:
+def require_bearer(
+    view: F | None = None, *, server: ResourceServer | None = None, allow_clients: bool = True
+) -> Any:
     """Verifies the request's OpenID Provider access token and puts the
     :class:`~seamless_auth.VerifiedUser` on ``request.seamless_bearer``. Answers 401
-    ``missing_token`` or ``invalid_token`` otherwise. Uses ``server``, or the one
+    ``missing_token`` or ``invalid_token`` otherwise. With ``allow_clients=False`` a
+    client credentials token answers 403 ``user_required``. Uses ``server``, or the one
     ``settings.SEAMLESS_RESOURCE_SERVER`` configures. Put it above the
     :func:`require_scope`, :func:`require_role` and :func:`require_step_up`
     decorators; they run top to bottom after it. Works on sync and async views."""
@@ -270,7 +275,9 @@ def require_bearer(view: F | None = None, *, server: ResourceServer | None = Non
             request.method or "GET", _headers(request), request.build_absolute_uri
         )
         try:
-            user = (server or get_resource_server()).authenticate(values, bearer)
+            user = (server or get_resource_server()).authenticate(
+                values, bearer, allow_clients=allow_clients
+            )
         except BearerError as err:
             return _bearer_response(err)
         request.seamless_bearer = user  # type: ignore[attr-defined]

@@ -62,6 +62,10 @@ def invalid_token() -> BearerError:
     return BearerError(401, {"error": "invalid_token"}, 'Bearer error="invalid_token"')
 
 
+def user_required() -> BearerError:
+    return BearerError(403, {"error": "user_required"}, None)
+
+
 @dataclass(frozen=True)
 class VerifiedUser:
     """The caller an OpenID Provider access token names. A client credentials token
@@ -83,6 +87,12 @@ class VerifiedUser:
     verified_at: float = 0
     claims: dict[str, Any] = field(default_factory=dict, repr=False, compare=False)
     token: str = field(default="", repr=False)
+
+    @property
+    def is_client(self) -> bool:
+        """A client credentials token: a machine acting for itself, with no user
+        behind it. ``sub`` is then a client id, not a user id."""
+        return self.sub == self.client_id
 
 
 class BearerRequest:
@@ -144,14 +154,23 @@ class ResourceServer:
         return f"ResourceServer(issuer={self.issuer!r}, audience={self.audience!r})"
 
     def authenticate(
-        self, authorization: str | None, request: BearerRequest | None = None
+        self,
+        authorization: str | None,
+        request: BearerRequest | None = None,
+        *,
+        allow_clients: bool = True,
     ) -> VerifiedUser:
         """The user an ``Authorization`` header carries. Raises :class:`BearerError`,
-        ``missing_token`` or ``invalid_token``."""
+        ``missing_token`` or ``invalid_token``. With ``allow_clients=False`` a client
+        credentials token (:attr:`VerifiedUser.is_client`) raises 403
+        ``user_required``."""
         token = bearer_token(authorization)
         if token is None:
             raise missing_token()
-        return self.verify(token, request)
+        user = self.verify(token, request)
+        if user.is_client and not allow_clients:
+            raise user_required()
+        return user
 
     def verify(self, token: str, request: BearerRequest | None = None) -> VerifiedUser:
         """Verifies a token. Raises :class:`BearerError` ``invalid_token``."""
