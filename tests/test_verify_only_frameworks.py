@@ -7,7 +7,7 @@ from typing import Any
 
 import pytest
 from django.conf import settings
-from verify_only_support import VECTORS, Provider, guard_of
+from verify_only_support import ALL_REQUESTS, VECTORS, Provider, allow_clients_of, guard_of
 
 if not settings.configured:
     settings.configure(
@@ -29,11 +29,17 @@ from seamless_auth import BearerRequest, VerifiedUser, require_scope
 from seamless_auth.django import _reset_resource_server
 from seamless_auth.fastapi import RequireBearer, add_bearer_error_handler
 
-REQUESTS: list[dict[str, Any]] = VECTORS["requests"]
+REQUESTS = ALL_REQUESTS
 
 
 def test_request_vector_names_are_unique() -> None:
     assert len({r["name"] for r in REQUESTS}) == len(REQUESTS)
+
+
+def test_the_user_required_vectors_are_run() -> None:
+    names = {r["name"] for r in REQUESTS}
+    assert {r["name"] for r in VECTORS["user_required_requests"]} <= names
+    assert all(r["auth"] == {"allow_clients": False} for r in VECTORS["user_required_requests"])
 
 
 def _headers(vector: dict[str, Any]) -> dict[str, str]:
@@ -57,7 +63,9 @@ def fastapi_client() -> TestClient:
     app = FastAPI()
     add_bearer_error_handler(app)
     for i, vector in enumerate(REQUESTS):
-        dependency = RequireBearer(server, *guard_of(vector["guard"]))
+        dependency = RequireBearer(
+            server, *guard_of(vector["guard"]), allow_clients=allow_clients_of(vector)
+        )
 
         def handler(user: VerifiedUser = Depends(dependency)) -> dict[str, bool]:  # noqa: B008
             return {"ok": True}

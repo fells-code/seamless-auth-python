@@ -184,6 +184,9 @@ class RequireBearer:
     """A dependency that verifies the request's OpenID Provider access token, runs
     ``guards`` in order, and returns the :class:`~seamless_auth.VerifiedUser`.
 
+    With ``allow_clients=False`` a client credentials token is refused with 403
+    ``user_required``, before the guards run.
+
     ``base_url`` is this API's public origin, such as ``https://api.example.com``.
     The ``confirm`` hook's URL (a DPoP proof's ``htu``) takes its scheme and host
     from it rather than from the request, whose ``Host`` header the client chooses.
@@ -194,9 +197,16 @@ class RequireBearer:
     fetch the provider's discovery document and key set.
     """
 
-    def __init__(self, server: ResourceServer, *guards: Guard, base_url: str | None = None) -> None:
+    def __init__(
+        self,
+        server: ResourceServer,
+        *guards: Guard,
+        allow_clients: bool = True,
+        base_url: str | None = None,
+    ) -> None:
         self._server = server
         self._guards = guards
+        self._allow_clients = allow_clients
         self._origin: tuple[str, str] | None = None
         if base_url is not None:
             parts = urlsplit(base_url) if isinstance(base_url, str) else None
@@ -222,7 +232,11 @@ class RequireBearer:
         bearer = BearerRequest(request.method, _headers(request), lambda: self._url(request))
         try:
             # More than one Authorization header is not one token.
-            user = self._server.authenticate(values[0] if len(values) == 1 else None, bearer)
+            user = self._server.authenticate(
+                values[0] if len(values) == 1 else None,
+                bearer,
+                allow_clients=self._allow_clients,
+            )
             for guard in self._guards:
                 guard.check(user)
         except BearerError as err:

@@ -5,7 +5,7 @@ from typing import Any
 
 from django.http import HttpRequest, JsonResponse
 from django.urls import path
-from verify_only_support import VECTORS
+from verify_only_support import ALL_REQUESTS, allow_clients_of
 
 from seamless_auth.django import (
     bearer_user_of,
@@ -16,7 +16,8 @@ from seamless_auth.django import (
 )
 
 
-def _decorate(view: Any, guard: dict[str, Any] | None) -> Any:
+def _decorate(view: Any, vector: dict[str, Any]) -> Any:
+    guard = vector["guard"]
     if guard is not None:
         if guard["kind"] == "scope":
             view = require_scope(*guard["scopes"])(view)
@@ -28,6 +29,8 @@ def _decorate(view: Any, guard: dict[str, Any] | None) -> Any:
                 max_age=guard.get("max_age"),
                 amr=guard.get("amr"),
             )(view)
+    if "auth" in vector:
+        return require_bearer(allow_clients=allow_clients_of(vector))(view)
     return require_bearer(view)
 
 
@@ -58,13 +61,10 @@ def me(request: HttpRequest) -> JsonResponse:
 
 
 urlpatterns = [
+    *(path(f"sync/{i}", _decorate(ok, r), name=f"vo-sync-{i}") for i, r in enumerate(ALL_REQUESTS)),
     *(
-        path(f"sync/{i}", _decorate(ok, r["guard"]), name=f"vo-sync-{i}")
-        for i, r in enumerate(VECTORS["requests"])
-    ),
-    *(
-        path(f"async/{i}", _decorate(ok_async, r["guard"]), name=f"vo-async-{i}")
-        for i, r in enumerate(VECTORS["requests"])
+        path(f"async/{i}", _decorate(ok_async, r), name=f"vo-async-{i}")
+        for i, r in enumerate(ALL_REQUESTS)
     ),
     path("unverified", unverified),
     path("ordered", ordered),
