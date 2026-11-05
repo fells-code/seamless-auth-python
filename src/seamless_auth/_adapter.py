@@ -174,6 +174,16 @@ def _error(status: int, code: str) -> _Reply:
 
 
 @dataclass
+class _RefreshFailed:
+    """A cookie-transport refresh that did not rotate. ``reply`` is what to answer
+    while the session stands; None means the session is over: the auth API refused
+    the refresh token, or the refresh cookie could not be read."""
+
+    reason: str
+    reply: _Reply | None = None
+
+
+@dataclass
 class _Forwarded:
     ip: str | None
     user_agent: str | None
@@ -483,8 +493,10 @@ class Adapter:
             if isinstance(refreshed, tuple):
                 session, cookies = refreshed
                 return f"Bearer {str_claim(session, 'token')}", cookies
-            if refreshed != _NO_REFRESH_COOKIE:
-                log.debug("[seamless-auth] Silent refresh failed: %s", refreshed)
+            if refreshed is not None:
+                log.debug("[seamless-auth] Silent refresh failed: %s", refreshed.reason)
+                if refreshed.reply is not None:
+                    return refreshed.reply
                 reply = _error(401, "Refresh failed")
                 reply.clear = [
                     self._config.access_cookie_name,
@@ -782,28 +794,40 @@ class Adapter:
 
     def _silent_refresh(
         self, headers: Headers, forwarded: _Forwarded
-    ) -> tuple[Claims, list[CookieWrite]] | str:
-        """Rotates the session held in the refresh cookie."""
+    ) -> tuple[Claims, list[CookieWrite]] | _RefreshFailed | None:
+        """Rotates the session held in the refresh cookie. None when there is no
+        refresh cookie. Only a 401 from the auth API or an unreadable cookie ends
+        the session; a failure that may pass (the API unreachable or answering
+        otherwise, a rotation that cannot be vouched for) keeps it, so the next
+        request can try again."""
         name = self._config.refresh_cookie_name
         raw = raw_cookie(headers, name)
         if not raw:
-            return _NO_REFRESH_COOKIE
+            return None
         payload = read_cookie(self._config, headers, name, KIND_REFRESH)
         refresh_token = str_claim(payload, "refreshToken")
         if not refresh_token:
-            return "invalid refresh cookie"
+            return _RefreshFailed("invalid refresh cookie")
         service = self._sign_service(str_claim(payload, "sub"), {"refreshToken": refresh_token})
 
         outcome = self._refreshes.share(
             f"cookie:{raw}", lambda: self._rotate(forwarded, refresh_token, service), keep=True
         )
+        unavailable = _error(502, "upstream_unavailable")
         if outcome.session is None:
-            return outcome.error or f"refresh answered {outcome.status}"
+            if outcome.error is not None:
+                return _RefreshFailed(outcome.error, unavailable)
+            reason = f"refresh answered {outcome.status}"
+            if outcome.status == 401:
+                return _RefreshFailed(reason)
+            if 200 <= outcome.status < 300:
+                return _RefreshFailed(reason, unavailable)
+            return _RefreshFailed(reason, _failure(outcome.status, outcome.body, outcome.is_json))
         try:
             session_id = self._verify_session(outcome.session, "access")
             cookies = session_cookies(self._config, outcome.session, session_id, True)
         except (TokenError, ValueError) as err:
-            return str(err)
+            return _RefreshFailed(str(err), unavailable)
         return outcome.session, cookies
 
     def _refresh_route(self, headers: Headers, forwarded: _Forwarded, bearer: bool) -> _Reply:
@@ -826,10 +850,12 @@ class Adapter:
             return _Reply(200, outcome.session)
 
         refreshed = self._silent_refresh(headers, forwarded)
-        if refreshed == _NO_REFRESH_COOKIE:
+        if refreshed is None:
             return _error(401, "refresh token required")
-        if not isinstance(refreshed, tuple):
-            log.debug("[seamless-auth] Refresh failed: %s", refreshed)
+        if isinstance(refreshed, _RefreshFailed):
+            log.debug("[seamless-auth] Refresh failed: %s", refreshed.reason)
+            if refreshed.reply is not None:
+                return refreshed.reply
             reply = _error(401, "invalid_refresh_token")
             reply.clear = [self._config.access_cookie_name, self._config.refresh_cookie_name]
             return reply
@@ -1012,9 +1038,6 @@ class Adapter:
             _normalize_origin(allowed) == normalized
             for allowed in self._config.allowed_origins or ()
         )
-
-
-_NO_REFRESH_COOKIE = "no refresh cookie"
 
 
 def _check_roles(user: User, required: tuple[str, ...] | None) -> None:
