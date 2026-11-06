@@ -168,9 +168,8 @@ session when any one of the user's roles grants any one listed role, by `role_gr
 port of `roleGrantsAccess` in `@seamless-auth/types`): `org:*` grants `org` and `org:billing`, an
 unscoped `org` grants `org:billing`, and `projects:write` grants `projects:read`. The roles come
 from the verified access token. A session granted none answers 403
-`{ "error": "insufficient_role" }` (FastAPI: `{ "detail": "insufficient_role" }`), after the
-session, recovery and cross-site checks, and the body never names the roles. An empty `roles`
-list raises `ValueError` when the guard is built.
+`{ "error": "insufficient_role" }`, after the session, recovery and cross-site checks, and the body
+never names the roles. An empty `roles` list raises `ValueError` when the guard is built.
 
 ```python
 @app.get("/api/admin")
@@ -234,10 +233,9 @@ Matching is exact and case-sensitive, unlike roles: no trimming, no wildcards, n
 | Token omits its permissions and the live read fails | 503 `{ "error": "permissions_unavailable" }` |
 | Live read answers 401 | The guard's 401 |
 
-These two bodies are the same on FastAPI and Django, with no setup. A dependency can only raise, so
-on FastAPI the guard registers a handler for its `PermissionHTTPException` the first time it refuses
-a request. To answer differently, register your own for that class. The guard's 401 and
-`enrollment_required` are the same as `RequireUser`'s, so on FastAPI they stay under `detail`.
+Every guard refusal has the same `{ "error": ... }` body on FastAPI and Django, with no setup. A
+dependency can only raise, so on FastAPI the guard registers a handler for its `GuardHTTPException`
+the first time it refuses a request. To answer differently, register your own for that class.
 
 A large permission set does not fit in a token, so the API sends `permissions_omitted: true` in
 place of `permissions`, `org_roles` and `org_permissions`. `User.permissions` is then empty, which
@@ -259,9 +257,8 @@ and `Adapter.authenticate` raise `InsufficientPermission` or `PermissionsUnavail
 A user who signs in with a recovery code, or completes self-service account recovery, gets a
 recovery session: its access token carries `recovery: true`, and the auth API refuses it on
 everything but enrolling a new passkey or authenticator app until they do. The guard refuses it
-too, with 403 `{ "error": "enrollment_required" }` (FastAPI's `RequireUser` answers `{ "detail":
-"enrollment_required" }`, as it does its other errors), so an application never treats a
-half-recovered account as signed in. Allow it on the routes that guide the user through
+too, with 403 `{ "error": "enrollment_required" }`, so an application never treats a half-recovered
+account as signed in. Allow it on the routes that guide the user through
 enrollment with `allow_recovery=True`, and read `User.recovery` there.
 `Adapter.authenticate` raises `EnrollmentRequired`, a subclass of `Unauthenticated`.
 
