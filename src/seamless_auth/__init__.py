@@ -17,7 +17,9 @@ from ._adapter import (
     Adapter,
     CrossSiteRequest,
     EnrollmentRequired,
+    InsufficientPermission,
     InsufficientRole,
+    PermissionsUnavailable,
     Unauthenticated,
     User,
     has_any_role,
@@ -26,6 +28,7 @@ from ._client_ip import TrustedProxies
 from ._delivery import Delivery
 from ._http import AuthRequest, AuthResponse, Headers, ResponseCookie
 from ._manifest import MANIFEST_PATH, Manifest, ManifestError, ManifestRoute
+from ._permissions import PermissionMode, PermissionRule
 from ._resource_server import (
     BearerError,
     BearerRequest,
@@ -33,6 +36,7 @@ from ._resource_server import (
     Guard,
     ResourceServer,
     VerifiedUser,
+    require_permission,
     require_role,
     require_scope,
     require_step_up,
@@ -52,10 +56,14 @@ __all__ = [
     "EnrollmentRequired",
     "Guard",
     "Headers",
+    "InsufficientPermission",
     "InsufficientRole",
     "Manifest",
     "ManifestError",
     "ManifestRoute",
+    "PermissionMode",
+    "PermissionRule",
+    "PermissionsUnavailable",
     "ResourceServer",
     "ResponseCookie",
     "TrustedProxies",
@@ -63,6 +71,7 @@ __all__ = [
     "User",
     "VerifiedUser",
     "has_any_role",
+    "require_permission",
     "require_role",
     "require_scope",
     "require_step_up",

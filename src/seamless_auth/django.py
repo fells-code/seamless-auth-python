@@ -24,6 +24,10 @@ Configure the adapter in settings, include its URLs, and guard views::
     def admin(request):
         return JsonResponse({"id": user_of(request).id})
 
+    @require_auth(permissions=["projects:read"], organization_param="organization_id")
+    def projects(request, organization_id):
+        return JsonResponse({"id": user_of(request).id})
+
 ``SEAMLESS_AUTH`` takes the keyword arguments of :class:`seamless_auth.Adapter`.
 ``deliver`` and ``resolve_client_ip`` may be dotted paths to callables.
 
@@ -52,7 +56,7 @@ from __future__ import annotations
 import functools
 import inspect
 import threading
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from typing import Any, Literal, TypeVar, cast, overload
 from urllib.parse import quote, unquote
 
@@ -69,12 +73,15 @@ from ._adapter import (
     Adapter,
     CrossSiteRequest,
     EnrollmentRequired,
+    InsufficientPermission,
     InsufficientRole,
+    PermissionsUnavailable,
     Unauthenticated,
     User,
     required_roles,
 )
 from ._http import AuthRequest, AuthResponse, Headers
+from ._permissions import PermissionMode, PermissionRule, required_permissions
 from ._resource_server import (
     BearerError,
     BearerRequest,
@@ -83,6 +90,7 @@ from ._resource_server import (
     VerifiedUser,
     missing_token,
 )
+from ._resource_server import require_permission as _permission_guard
 from ._resource_server import require_role as _role_guard
 from ._resource_server import require_scope as _scope_guard
 from ._resource_server import require_step_up as _step_up_guard
@@ -96,6 +104,7 @@ __all__ = [
     "get_resource_server",
     "require_auth",
     "require_bearer",
+    "require_permission",
     "require_role",
     "require_scope",
     "require_step_up",
@@ -190,7 +199,13 @@ console_urlpatterns = [re_path(r"^(?P<path>.*)$", console_view, name="seamless-c
 def require_auth(view: F) -> F: ...
 @overload
 def require_auth(
-    *, allow_recovery: bool = False, roles: Iterable[str] | None = None
+    *,
+    allow_recovery: bool = False,
+    roles: Iterable[str] | None = None,
+    permissions: Iterable[str] | None = None,
+    permission_mode: PermissionMode = "any",
+    organization: bool = False,
+    organization_param: str | None = None,
 ) -> Callable[[F], F]: ...
 
 
@@ -199,6 +214,10 @@ def require_auth(
     *,
     allow_recovery: bool = False,
     roles: Iterable[str] | None = None,
+    permissions: Iterable[str] | None = None,
+    permission_mode: PermissionMode = "any",
+    organization: bool = False,
+    organization_param: str | None = None,
 ) -> Any:
     """Answers 401 unless the request carries a valid session, and puts the
     :class:`~seamless_auth.User` on ``request.seamless_user``. A session from the
@@ -207,14 +226,30 @@ def require_auth(
     or authenticator app) answers 403 ``enrollment_required`` unless
     ``@require_auth(allow_recovery=True)``. With ``roles``, a session granted none
     of them (by :func:`~seamless_auth.role_grants_access`) answers 403
-    ``insufficient_role``. Works on sync and async views."""
+    ``insufficient_role``. With ``permissions``, a session that does not meet the
+    :class:`~seamless_auth.PermissionRule` answers 403 ``insufficient_permission``, and
+    when a token omits its permissions and the live read fails, 503
+    ``permissions_unavailable``. An empty list allows nobody. ``organization_param``
+    names the URL parameter that must equal the active organization's id. Works on
+    sync and async views."""
     required = required_roles(roles)
+    rule = required_permissions(
+        permissions,
+        mode=permission_mode,
+        organization=organization,
+        organization_param=organization_param,
+    )
     if view is None:
-        return lambda inner: _guard(inner, allow_recovery, required)
-    return _guard(view, allow_recovery, required)
+        return lambda inner: _guard(inner, allow_recovery, required, rule)
+    return _guard(view, allow_recovery, required, rule)
 
 
-def _guard(view: F, allow_recovery: bool, roles: tuple[str, ...] | None) -> F:
+def _guard(
+    view: F,
+    allow_recovery: bool,
+    roles: tuple[str, ...] | None,
+    permissions: PermissionRule | None,
+) -> F:
     def check(request: HttpRequest) -> HttpResponse | None:
         try:
             user = get_adapter().authenticate_request(
@@ -222,7 +257,13 @@ def _guard(view: F, allow_recovery: bool, roles: tuple[str, ...] | None) -> F:
                 _headers(request),
                 allow_recovery=allow_recovery,
                 roles=roles,
+                permissions=permissions,
+                route_params=_route_params(request),
             )
+        except InsufficientPermission:
+            return JsonResponse({"error": "insufficient_permission"}, status=403)
+        except PermissionsUnavailable:
+            return JsonResponse({"error": "permissions_unavailable"}, status=503)
         except InsufficientRole:
             return JsonResponse({"error": "insufficient_role"}, status=403)
         except EnrollmentRequired:
@@ -266,8 +307,9 @@ def require_bearer(
     ``missing_token`` or ``invalid_token`` otherwise. With ``allow_clients=False`` a
     client credentials token answers 403 ``user_required``. Uses ``server``, or the one
     ``settings.SEAMLESS_RESOURCE_SERVER`` configures. Put it above the
-    :func:`require_scope`, :func:`require_role` and :func:`require_step_up`
-    decorators; they run top to bottom after it. Works on sync and async views."""
+    :func:`require_scope`, :func:`require_role`, :func:`require_permission` and
+    :func:`require_step_up` decorators; they run top to bottom after it. Works on sync
+    and async views."""
 
     def check(request: HttpRequest) -> HttpResponse | None:
         values = request.headers.get("Authorization")
@@ -300,6 +342,26 @@ def require_role(*roles: str) -> Callable[[F], F]:
     return _guarded(_role_guard(*roles))
 
 
+def require_permission(
+    *permissions: str,
+    mode: PermissionMode = "any",
+    organization: bool = False,
+    organization_param: str | None = None,
+) -> Callable[[F], F]:
+    """Under :func:`require_bearer`: the token must meet the rule, else 403
+    ``insufficient_permission``. Provider tokens do not carry these claims until
+    fells-code/seamless-auth-oidc-provider#47, so this denies them today. For a session,
+    use ``@require_auth(permissions=[...])``."""
+    return _guarded(
+        _permission_guard(
+            *permissions,
+            mode=mode,
+            organization=organization,
+            organization_param=organization_param,
+        )
+    )
+
+
 def require_step_up(
     *,
     acr_values: list[str] | tuple[str, ...] | None = None,
@@ -322,7 +384,7 @@ def _guarded(guard: Guard) -> Callable[[F], F]:
         try:
             if not isinstance(user, VerifiedUser):
                 raise missing_token()
-            guard.check(user)
+            guard.check_route(user, _route_params(request))
         except BearerError as err:
             return _bearer_response(err)
         return None
@@ -359,6 +421,11 @@ def user_of(request: HttpRequest) -> User:
     guard: it is not an optional-user lookup and raises ``AttributeError`` on an
     unguarded request."""
     return cast(User, request.seamless_user)  # type: ignore[attr-defined]
+
+
+def _route_params(request: HttpRequest) -> Mapping[str, Any]:
+    match = request.resolver_match
+    return match.kwargs if match is not None else {}
 
 
 def _headers(request: HttpRequest) -> Headers:

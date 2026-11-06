@@ -158,6 +158,8 @@ bearer`) included, as the other adapters do. A native client sends neither `Sec-
 
 `User.organization_id` is the active organization, from the `org_id` claim of the verified access
 token, or `None` when the session has none. Like `User.roles`, it never comes from the cookie.
+`User.permissions`, `User.organization_roles`, `User.organization_permissions` and
+`User.permissions_omitted` come from that token in the same way (see [Permissions](#permissions)).
 
 ### Roles
 
@@ -184,6 +186,73 @@ def billing(request):
 
 `Adapter.authenticate_request(method, headers, roles=[...])` and `Adapter.authenticate(headers,
 roles=[...])` raise `InsufficientRole`; `has_any_role(user, roles)` is the check on its own.
+
+### Permissions
+
+`permissions` on the guard (`RequireUser(auth, permissions=[...])`,
+`@require_auth(permissions=[...])`) admits a session that holds the listed permissions. It needs
+the auth API at v0.23, which issues the claims. Lead with the form bound to the route, because
+without it a token for organization A passes on `/orgs/B/...`:
+
+```python
+# FastAPI
+@app.get("/orgs/{organization_id}/projects")
+def projects(
+    user: User = Depends(
+        RequireUser(auth, permissions=["projects:read"], organization_param="organization_id")
+    ),
+):
+    return {"id": user.id}
+```
+
+```python
+# Django
+@require_auth(permissions=["projects:read"], organization_param="organization_id")
+def projects(request, organization_id):
+    return JsonResponse({"id": user_of(request).id})
+```
+
+| Option | Effect |
+| --- | --- |
+| `permissions=[...]` | What the route requires. An empty list allows nobody, in any mode |
+| `permission_mode="any"` | The default: at least one is held |
+| `permission_mode="all"` | Every one is held, each from either claim |
+| `organization=True` | Only `org_permissions` count, and the token must have a non-empty `org_id` |
+| `organization_param="name"` | `organization=True`, and the route parameter `name` must equal `org_id` exactly. A missing parameter is refused |
+
+Without `organization` or `organization_param`, a permission is held if it is in `permissions` or
+`org_permissions`.
+
+Matching is exact and case-sensitive, unlike roles: no trimming, no wildcards, no implied grants.
+`invoices:write` does not satisfy `invoices:read`. Organization roles never count for `roles`.
+
+| Situation | Answer |
+| --- | --- |
+| Not authenticated | The guard's 401 |
+| Recovery session | The guard's 403 `enrollment_required`, unless `allow_recovery` is set |
+| Requirement not met | 403 `{ "error": "insufficient_permission" }`, naming no permissions |
+| Token omits its permissions and the live read fails | 503 `{ "error": "permissions_unavailable" }` |
+| Live read answers 401 | The guard's 401 |
+
+These two bodies are the same on FastAPI and Django, with no setup. A dependency can only raise, so
+on FastAPI the guard registers a handler for its `PermissionHTTPException` the first time it refuses
+a request. To answer differently, register your own for that class. The guard's 401 and
+`enrollment_required` are the same as `RequireUser`'s, so on FastAPI they stay under `detail`.
+
+A large permission set does not fit in a token, so the API sends `permissions_omitted: true` in
+place of `permissions`, `org_roles` and `org_permissions`. `User.permissions` is then empty, which
+means unknown rather than none. The guard reads `GET {auth_server_url}/users/me/permissions` with
+the caller's access token and applies the same rules to `permissions`, `organizationPermissions`
+and `organizationId`, with no cache and no retry. Any other status than 2xx or 401, a timeout, or a
+malformed body fails closed. Under FastAPI and async Django the guard already runs on a worker
+thread, so the read does not block the event loop.
+
+In the permission claims, a value that is not a list reads as empty and entries that are not
+strings are ignored. A `permissions` that is a bare string, or a name that is not a non-empty
+string, raises when the guard is built, as do the other options without `permissions`.
+
+`Adapter.authenticate_request(method, headers, permissions=PermissionRule(...), route_params=...)`
+and `Adapter.authenticate` raise `InsufficientPermission` or `PermissionsUnavailable`.
 
 ### Recovery sessions
 
@@ -490,6 +559,7 @@ step-up guards run after.
 | --- | --- | --- |
 | `require_scope(*scopes)` | every scope is in `scopes`, exactly | 403 `{"error":"insufficient_scope","scope":"a b"}`, `WWW-Authenticate: Bearer error="insufficient_scope", scope="a b"` |
 | `require_role(*roles)` | any role is granted (`x:*` grants `x` and under, `billing` grants `billing:...`, `p:write` grants `p:read`) | 403 `{"error":"insufficient_role"}` |
+| `require_permission(*permissions, mode=, organization=, organization_param=)` | the token meets the rule in [Permissions](#permissions) | 403 `{"error":"insufficient_permission"}` |
 | `require_step_up(acr_values=, amr=, max_age=)` | `acr` is one of `acr_values` (`phr` also accepts `phrh`), every `amr` is present, and at most `max_age` seconds since `auth_time` | 401 `insufficient_user_authentication` (RFC 9470) |
 
 A missing token, a scheme other than `Bearer` or more than one token answers 401
@@ -503,6 +573,17 @@ WWW-Authenticate: Bearer error="insufficient_user_authentication",
 
 with the same fields in the JSON body (`max_age` as a number). `role_grants_access(granted,
 required)` is the role matching on its own.
+
+`require_permission` matches the session guard, but **it denies every token today**: provider tokens
+do not carry `permissions`, `org_permissions` or `permissions_omitted` until
+[seamless-auth-oidc-provider#47](https://github.com/fells-code/seamless-auth-oidc-provider/issues/47).
+A token with `permissions_omitted` answers 403 rather than a live read, because the first-party
+endpoint refuses provider tokens. An empty call allows nobody. On FastAPI its refusal is
+`{"error":"insufficient_permission"}` with or without `add_bearer_error_handler`. On Django it goes
+under `@require_bearer`, and `organization_param` names a URL parameter.
+
+`VerifiedUser` carries the same `permissions`, `organization_roles`, `organization_permissions` and
+`permissions_omitted`, and keeps its `org_id`.
 
 ### Sender-constrained tokens
 
@@ -571,6 +652,9 @@ PORT=8080 AUTH_SERVER_URL=http://localhost:5312 AUTH_SERVER_ISSUER=http://auth-a
 
 SEAMLESS_API_DIR=../seamless-auth-api seamless verify --adapter-url=http://localhost:8080
 ```
+
+The `/api/permissions/*` routes serve the pending `permission-guards` contract. It needs the auth
+API at v0.23: add `SEAMLESS_VERIFY_CONTRACTS=permission-guards` to run those specs.
 
 ## Status
 

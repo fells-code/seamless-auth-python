@@ -9,7 +9,7 @@ import logging
 import re
 import threading
 import time
-from collections.abc import Awaitable, Callable, Iterable, Iterator
+from collections.abc import Awaitable, Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
@@ -34,6 +34,7 @@ from ._http import AuthRequest, AuthResponse, Headers
 from ._jwks import BodyTooLarge, JwksCache, TokenError, read_limited
 from ._jwt import Claims, sign_hs256, str_claim, unverified_claims
 from ._manifest import ManifestRoute, ManifestSource, RouteMatch
+from ._permissions import PermissionRule, permission_names
 from ._refresh import Refresher, RefreshOutcome
 from ._resource_server import as_names, role_grants_access
 
@@ -102,6 +103,16 @@ class User:
     organization_id: str | None = None
     #: The auth API access token, for calling the API on the user's behalf.
     token: str = field(default="", repr=False)
+    #: Instance permissions, from the verified access token's ``permissions`` claim.
+    permissions: tuple[str, ...] = ()
+    #: The user's roles in the active organization. They never count as ``roles``.
+    organization_roles: tuple[str, ...] = ()
+    #: The user's permissions in the active organization.
+    organization_permissions: tuple[str, ...] = ()
+    #: The token left its permissions out because they would not fit. The three
+    #: fields above are then empty, which means unknown, not none. A permission guard
+    #: reads the live set from the auth API.
+    permissions_omitted: bool = False
 
 
 class Unauthenticated(Exception):
@@ -120,6 +131,16 @@ class CrossSiteRequest(Exception):
 class InsufficientRole(Exception):
     """A session granted none of the roles a guard requires. Answer it 403
     ``insufficient_role``, without naming the roles."""
+
+
+class InsufficientPermission(Exception):
+    """A session that does not meet a guard's permission rule. Answer it 403
+    ``insufficient_permission``, without naming the permissions."""
+
+
+class PermissionsUnavailable(Exception):
+    """A token that omits its permissions, and a live read of them that failed. Answer
+    it 503 ``permissions_unavailable``: a guard fails closed."""
 
 
 def required_roles(roles: Iterable[str] | None) -> tuple[str, ...] | None:
@@ -907,6 +928,8 @@ class Adapter:
         *,
         allow_recovery: bool = False,
         roles: Iterable[str] | None = None,
+        permissions: PermissionRule | None = None,
+        route_params: Mapping[str, Any] | None = None,
     ) -> User:
         """Verifies a request's session: the adapter's access cookie, or an auth API
         access token in ``Authorization: Bearer`` for clients with no cookie jar.
@@ -915,10 +938,15 @@ class Adapter:
         ``POST /auth/refresh`` itself. Raises :class:`Unauthenticated`, or its
         subclass :class:`EnrollmentRequired` for a recovery session unless
         ``allow_recovery`` is set. With ``roles``, raises :class:`InsufficientRole`
-        unless the session is granted any one of them."""
+        unless the session is granted any one of them. With ``permissions``, raises
+        :class:`InsufficientPermission` unless the session meets the rule, whose
+        ``organization_param`` is looked up in ``route_params``. A token that omits its
+        permissions is checked against a live read of them, which is blocking and
+        raises :class:`PermissionsUnavailable` if it fails."""
         required = required_roles(roles)
         user = self._authenticate(_as_headers(headers), allow_recovery)[0]
         _check_roles(user, required)
+        self._check_permissions(user, permissions, route_params)
         return user
 
     def authenticate_request(
@@ -928,6 +956,8 @@ class Adapter:
         *,
         allow_recovery: bool = False,
         roles: Iterable[str] | None = None,
+        permissions: PermissionRule | None = None,
+        route_params: Mapping[str, Any] | None = None,
     ) -> User:
         """:meth:`authenticate` for a guarded route. A session from the cookie also
         gets the auth routes' cross-site check, or a form on another site could act
@@ -938,6 +968,7 @@ class Adapter:
         if by_cookie and self._check_origin(method, headers) is not None:
             raise CrossSiteRequest
         _check_roles(user, required)
+        self._check_permissions(user, permissions, route_params)
         return user
 
     def optional_user(
@@ -949,6 +980,51 @@ class Adapter:
             return self.authenticate_request(method, headers)
         except (Unauthenticated, CrossSiteRequest):
             return None
+
+    def _check_permissions(
+        self, user: User, rule: PermissionRule | None, route_params: Mapping[str, Any] | None
+    ) -> None:
+        if rule is None:
+            return
+        # An empty rule can only deny, so it asks the auth API nothing.
+        if not rule.permissions:
+            raise InsufficientPermission
+        if user.permissions_omitted:
+            held = self._live_permissions(user.token)
+        else:
+            held = (user.permissions, user.organization_permissions, user.organization_id)
+        if not rule.allows(*held, route_params):
+            raise InsufficientPermission
+
+    def _live_permissions(self, token: str) -> tuple[tuple[str, ...], tuple[str, ...], str | None]:
+        """The caller's permissions, organization permissions and active organization,
+        read from the auth API. Not cached and not retried, so a change applies here
+        before the token catches up."""
+        try:
+            res = self._call(
+                _Forwarded(None, None),
+                "GET",
+                "/users/me/permissions",
+                authorization=f"Bearer {token}",
+                stream=True,
+            )
+        except _UpstreamError as err:
+            log.warning("[seamless-auth] The live permissions read failed: %s", err)
+            raise PermissionsUnavailable from None
+        status = res.status_code
+        if status == 401:
+            res.close()
+            raise Unauthenticated
+        if not 200 <= status < 300:
+            res.close()
+            log.warning("[seamless-auth] The live permissions read answered %s", status)
+            raise PermissionsUnavailable
+        body, _ = _read_json(res)
+        held = _live_permission_set(body)
+        if held is None:
+            log.warning("[seamless-auth] The live permissions read answered a malformed body")
+            raise PermissionsUnavailable
+        return held
 
     def _authenticate(self, headers: Headers, allow_recovery: bool) -> tuple[User, bool]:
         user, by_cookie = self._session_of(headers)
@@ -978,6 +1054,10 @@ class Adapter:
                     recovery=claims.get("recovery") is True,
                     organization_id=str_claim(claims, "org_id") or None,
                     token=token,
+                    permissions=permission_names(claims.get("permissions")),
+                    organization_roles=permission_names(claims.get("org_roles")),
+                    organization_permissions=permission_names(claims.get("org_permissions")),
+                    permissions_omitted=claims.get("permissions_omitted") is True,
                 ),
                 True,
             )
@@ -1173,6 +1253,30 @@ def _user_from(claims: Claims, token: str, recovery: bool) -> User:
         recovery=recovery,
         organization_id=str_claim(claims, "org_id") or None,
         token=token,
+        permissions=permission_names(claims.get("permissions")),
+        organization_roles=permission_names(claims.get("org_roles")),
+        organization_permissions=permission_names(claims.get("org_permissions")),
+        permissions_omitted=claims.get("permissions_omitted") is True,
+    )
+
+
+def _live_permission_set(body: Any) -> tuple[tuple[str, ...], tuple[str, ...], str | None] | None:
+    """The live read's answer, or ``None`` for a malformed one. Stricter than a claim:
+    a list that is missing here could otherwise read as holding nothing, when the
+    answer to give is that the set is unknown."""
+    if not isinstance(body, dict):
+        return None
+    permissions = body.get("permissions")
+    organization_permissions = body.get("organizationPermissions")
+    organization_id = body.get("organizationId")
+    if not isinstance(permissions, list) or not isinstance(organization_permissions, list):
+        return None
+    if organization_id is not None and not isinstance(organization_id, str):
+        return None
+    return (
+        permission_names(permissions),
+        permission_names(organization_permissions),
+        organization_id,
     )
 
 

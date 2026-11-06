@@ -20,6 +20,16 @@
     def admin(user: User = Depends(RequireUser(auth, roles=["admin"]))):
         return {"id": user.id}
 
+    @app.get("/orgs/{organization_id}/projects")
+    def projects(
+        user: User = Depends(
+            RequireUser(
+                auth, permissions=["projects:read"], organization_param="organization_id"
+            )
+        ),
+    ):
+        return {"id": user.id}
+
 Verify-only, for an API that only receives OpenID Provider access tokens::
 
     from seamless_auth import ResourceServer, VerifiedUser, require_scope
@@ -37,6 +47,7 @@ Verify-only, for an API that only receives OpenID Provider access tokens::
 from __future__ import annotations
 
 from collections.abc import Iterable
+from typing import Any
 from urllib.parse import quote, urlsplit
 
 from fastapi import APIRouter, FastAPI, HTTPException, Request
@@ -49,17 +60,21 @@ from ._adapter import (
     Adapter,
     CrossSiteRequest,
     EnrollmentRequired,
+    InsufficientPermission,
     InsufficientRole,
+    PermissionsUnavailable,
     Unauthenticated,
     User,
     required_roles,
 )
 from ._http import AuthRequest, AuthResponse, Headers
+from ._permissions import PermissionMode, required_permissions
 from ._resource_server import BearerError, BearerRequest, Guard, ResourceServer, VerifiedUser
 
 __all__ = [
     "BearerHTTPException",
     "OptionalUser",
+    "PermissionHTTPException",
     "RequireBearer",
     "RequireUser",
     "add_bearer_error_handler",
@@ -112,6 +127,13 @@ class RequireUser:
     ``allow_recovery`` is set. With ``roles``, a session granted none of them (by
     :func:`~seamless_auth.role_grants_access`) answers 403 ``insufficient_role``.
 
+    With ``permissions``, a session that does not meet the
+    :class:`~seamless_auth.PermissionRule` answers 403
+    ``{"error": "insufficient_permission"}``, and when a token omits its permissions
+    and the live read fails, 503 ``{"error": "permissions_unavailable"}``. An empty
+    list allows nobody. ``organization_param`` names the path parameter that must
+    equal the active organization's id.
+
     A plain function, so FastAPI runs it on its threadpool: the first sight of a key
     may fetch the auth API's key set.
     """
@@ -122,10 +144,20 @@ class RequireUser:
         *,
         allow_recovery: bool = False,
         roles: Iterable[str] | None = None,
+        permissions: Iterable[str] | None = None,
+        permission_mode: PermissionMode = "any",
+        organization: bool = False,
+        organization_param: str | None = None,
     ) -> None:
         self._adapter = adapter
         self._allow_recovery = allow_recovery
         self._roles = required_roles(roles)
+        self._permissions = required_permissions(
+            permissions,
+            mode=permission_mode,
+            organization=organization,
+            organization_param=organization_param,
+        )
 
     def __call__(self, request: Request) -> User:
         try:
@@ -134,7 +166,13 @@ class RequireUser:
                 _headers(request),
                 allow_recovery=self._allow_recovery,
                 roles=self._roles,
+                permissions=self._permissions,
+                route_params=request.path_params,
             )
+        except InsufficientPermission:
+            raise _permission_refusal(request, 403, "insufficient_permission") from None
+        except PermissionsUnavailable:
+            raise _permission_refusal(request, 503, "permissions_unavailable") from None
         except InsufficientRole:
             raise HTTPException(status_code=403, detail="insufficient_role") from None
         except EnrollmentRequired:
@@ -143,6 +181,33 @@ class RequireUser:
             raise HTTPException(status_code=403, detail="cross_site_request_blocked") from None
         except Unauthenticated:
             raise HTTPException(status_code=401, detail="unauthenticated") from None
+
+
+class PermissionHTTPException(HTTPException):
+    """A permission guard's refusal, answered ``{"error": ...}`` as on every other
+    framework and adapter, not FastAPI's ``{"detail": ...}``. To answer it differently,
+    register a handler for this class."""
+
+    def __init__(self, status_code: int, error: str) -> None:
+        super().__init__(status_code, detail=error)
+        self.body = {"error": error}
+
+
+def _permission_exception_handler(request: Request, exc: Exception) -> Response:
+    if not isinstance(exc, PermissionHTTPException):
+        raise exc
+    return JSONResponse(exc.body, status_code=exc.status_code)
+
+
+def _permission_refusal(request: Request, status: int, error: str) -> PermissionHTTPException:
+    # A dependency can only raise, and FastAPI's handler for an HTTPException always
+    # wraps the body in "detail". An add_exception_handler call would be a second step
+    # that, once forgotten, changes the response shape, so the guard registers the
+    # handler itself. A handler the application registered wins.
+    handlers: Any = request.scope.get("starlette.exception_handlers")
+    if handlers is not None:
+        handlers[0].setdefault(PermissionHTTPException, _permission_exception_handler)
+    return PermissionHTTPException(status, error)
 
 
 class OptionalUser:
@@ -238,8 +303,10 @@ class RequireBearer:
                 allow_clients=self._allow_clients,
             )
             for guard in self._guards:
-                guard.check(user)
+                guard.check_route(user, request.path_params)
         except BearerError as err:
+            if err.error == "insufficient_permission":
+                raise _permission_refusal(request, err.status, err.error) from None
             raise BearerHTTPException(err) from None
         return user
 
