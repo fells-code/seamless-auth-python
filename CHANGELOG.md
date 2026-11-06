@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.6.0](https://github.com/fells-code/seamless-auth-python/compare/v0.5.0...v0.6.0) (2026-11-06)
+
+
+### ⚠ BREAKING CHANGES
+
+* FastAPI RequireUser refusals (unauthenticated, insufficient_role, enrollment_required, cross_site_request_blocked) answer {"error": "<code>"} instead of {"detail": "<code>"}. A client that reads body.detail must read body.error. They also no longer reach an application's own HTTPException handler. To change them, register a handler for GuardHTTPException.
+
+### Added
+
+* **guard:** add an organization-aware permission guard ([#38](https://github.com/fells-code/seamless-auth-python/issues/38)) ([002ecb4](https://github.com/fells-code/seamless-auth-python/commit/002ecb4b8cff57984525b87be0862621d3ab0ffc)), closes [#32](https://github.com/fells-code/seamless-auth-python/issues/32)
+* let verify-only resource servers require a user ([#35](https://github.com/fells-code/seamless-auth-python/issues/35)) ([d095109](https://github.com/fells-code/seamless-auth-python/commit/d09510916ab386186e22c3ddb3ad3869695b6764))
+
+
+### Fixed
+
+* answer FastAPI session guard refusals under error ([#39](https://github.com/fells-code/seamless-auth-python/issues/39)) ([76739c1](https://github.com/fells-code/seamless-auth-python/commit/76739c1b560e8fc9419eec6b647ba4434f0f32af))
+* keep the session cookies when a refresh fails transiently ([#37](https://github.com/fells-code/seamless-auth-python/issues/37)) ([586b933](https://github.com/fells-code/seamless-auth-python/commit/586b933ba88f99a0cd1f17dd320c55f4cf2068ef))
+* origin check whatever the SameSite setting, and no JWKS lock across the fetch ([#33](https://github.com/fells-code/seamless-auth-python/issues/33)) ([3f8e828](https://github.com/fells-code/seamless-auth-python/commit/3f8e8287b5129b66783bc53576ee3653f8f0802f))
+* sync the bundled adapter manifest with API 0.22.0 ([5de9986](https://github.com/fells-code/seamless-auth-python/commit/5de9986529789f4b5a804b3bf8166463e4b79fef))
+* sync the bundled adapter manifest with API 0.22.0 ([f89c39c](https://github.com/fells-code/seamless-auth-python/commit/f89c39c38ffd1d65c22f92c97a3c513a6e8ec9c1))
+
 ## [0.5.0](https://github.com/fells-code/seamless-auth-python/compare/v0.4.0...v0.5.0) (2026-11-01)
 
 
