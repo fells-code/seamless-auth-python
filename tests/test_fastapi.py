@@ -162,7 +162,7 @@ def test_the_guard_refuses_a_recovery_session_unless_allowed(api: FakeApi) -> No
 
     r = client.get("/api/me", headers=recovery)
     assert r.status_code == 403
-    assert r.json() == {"detail": "enrollment_required"}
+    assert r.json() == {"error": "enrollment_required"}
     r = client.get("/api/enroll", headers=recovery)
     assert (r.status_code, r.json()) == (200, {"id": "u1", "recovery": True})
     assert client.get("/api/enroll").status_code == 401
@@ -200,13 +200,13 @@ def test_the_role_guard(api: FakeApi) -> None:
     client = app_for(api.adapter())
 
     r = client.get("/api/admin")
-    assert (r.status_code, r.json()) == (401, {"detail": "unauthenticated"})
+    assert (r.status_code, r.json()) == (401, {"error": "unauthenticated"})
     r = client.get("/api/admin", headers=bearer_header(roles=["user"]))
-    assert (r.status_code, r.json()) == (403, {"detail": "insufficient_role"})
+    assert (r.status_code, r.json()) == (403, {"error": "insufficient_role"})
     r = client.get(
         "/api/admin", headers=bearer_header(roles=["admin", "secret-role"], recovery=True)
     )
-    assert (r.status_code, r.json()) == (403, {"detail": "enrollment_required"})
+    assert (r.status_code, r.json()) == (403, {"error": "enrollment_required"})
     for roles in (["admin"], ["billing:*"], ["billing"]):
         r = client.get("/api/admin", headers=bearer_header(roles=roles))
         assert (r.status_code, r.json()) == (200, {"id": "u1"}), roles
@@ -215,12 +215,12 @@ def test_the_role_guard(api: FakeApi) -> None:
         "seamless-access", {"sub": "u1", "token": api_token("u1", "access"), "roles": ["admin"]}
     )
     r = client.get("/api/admin", headers={"cookie": cookie})
-    assert (r.status_code, r.json()) == (403, {"detail": "insufficient_role"})
+    assert (r.status_code, r.json()) == (403, {"error": "insufficient_role"})
     admin_cookie = signed_cookie(
         "seamless-access", {"sub": "u1", "token": api_token("u1", "access", roles=["admin"])}
     )
     r = client.post("/api/admin", headers={"cookie": admin_cookie, "sec-fetch-site": "cross-site"})
-    assert (r.status_code, r.json()) == (403, {"detail": "cross_site_request_blocked"})
+    assert (r.status_code, r.json()) == (403, {"error": "cross_site_request_blocked"})
 
 
 def test_the_role_guard_refuses_no_roles_at_setup(api: FakeApi) -> None:

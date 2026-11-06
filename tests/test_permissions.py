@@ -63,7 +63,7 @@ from seamless_auth import (
 )
 from seamless_auth.django import _reset_adapter, _reset_resource_server, require_auth
 from seamless_auth.fastapi import (
-    PermissionHTTPException,
+    GuardHTTPException,
     RequireBearer,
     RequireUser,
     add_bearer_error_handler,
@@ -97,8 +97,8 @@ def fastapi_app(adapter: Adapter) -> FastAPI:
 
 @dataclass
 class Stack:
-    """One framework's routes, and the bodies that framework gives the existing
-    refusals, which the permission guard leaves as they are."""
+    """One framework's routes, and the bodies its guard gives the refusals that are
+    not about permissions."""
 
     get: Callable[..., Any]
     prefix: str
@@ -115,7 +115,7 @@ def stack(request: pytest.FixtureRequest, api: FakeApi) -> Iterator[Stack]:
     if request.param == "fastapi":
         client = TestClient(fastapi_app(api.adapter()), base_url="https://testserver")
         yield Stack(
-            client.get, "sync", {"detail": "unauthenticated"}, {"detail": "enrollment_required"}
+            client.get, "sync", {"error": "unauthenticated"}, {"error": "enrollment_required"}
         )
         return
     options = {
@@ -741,20 +741,47 @@ def test_fastapi_an_application_handler_wins(api: FakeApi) -> None:
     def mine(request: Request, exc: Exception) -> Response:
         return JSONResponse({"mine": True}, status_code=418)
 
-    app.add_exception_handler(PermissionHTTPException, mine)
+    app.add_exception_handler(GuardHTTPException, mine)
     client = _one_route(api, RequireUser(api.adapter(), permissions=["reports:read"]), app)
 
     r = client.get("/x", headers=bearer())
     assert (r.status_code, r.json()) == (418, {"mine": True})
 
 
-def test_fastapi_the_session_role_guard_still_answers_under_detail(api: FakeApi) -> None:
-    """Records the role guard's existing difference from every other guard: its body is
-    ``{"detail": ...}``. The permission guard does not share it. See the README, Roles."""
+def test_fastapi_the_session_role_guard_answers_under_error(api: FakeApi) -> None:
     client = _one_route(api, RequireUser(api.adapter(), roles=["admin"]))
 
     r = client.get("/x", headers=bearer())
-    assert (r.status_code, r.json()) == (403, {"detail": "insufficient_role"})
+    assert (r.status_code, r.json()) == (403, {"error": "insufficient_role"})
+
+
+def test_fastapi_a_mounted_app_gets_the_error_body_from_every_refusal(api: FakeApi) -> None:
+    inner = FastAPI()
+    _one_route(api, RequireUser(api.adapter(), roles=["admin"]), inner)
+    outer = FastAPI()
+    outer.mount("/inner", inner)
+    client = TestClient(outer)
+
+    r = client.get("/inner/x")
+    assert (r.status_code, r.json()) == (401, {"error": "unauthenticated"})
+    r = client.get("/inner/x", headers=bearer())
+    assert (r.status_code, r.json()) == (403, {"error": "insufficient_role"})
+    r = client.get("/inner/x", headers=bearer(recovery=True))
+    assert (r.status_code, r.json()) == (403, {"error": "enrollment_required"})
+
+
+def test_fastapi_an_application_handler_wins_for_every_refusal(api: FakeApi) -> None:
+    app = FastAPI()
+
+    def mine(request: Request, exc: Exception) -> Response:
+        assert isinstance(exc, GuardHTTPException)
+        return JSONResponse({"mine": exc.detail}, status_code=418)
+
+    app.add_exception_handler(GuardHTTPException, mine)
+    client = _one_route(api, RequireUser(api.adapter(), roles=["admin"]), app)
+
+    assert client.get("/x").json() == {"mine": "unauthenticated"}
+    assert client.get("/x", headers=bearer()).json() == {"mine": "insufficient_role"}
 
 
 # Verify-only.

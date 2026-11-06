@@ -74,7 +74,6 @@ from ._resource_server import BearerError, BearerRequest, Guard, ResourceServer,
 __all__ = [
     "BearerHTTPException",
     "OptionalUser",
-    "PermissionHTTPException",
     "RequireBearer",
     "RequireUser",
     "add_bearer_error_handler",
@@ -128,11 +127,12 @@ class RequireUser:
     :func:`~seamless_auth.role_grants_access`) answers 403 ``insufficient_role``.
 
     With ``permissions``, a session that does not meet the
-    :class:`~seamless_auth.PermissionRule` answers 403
-    ``{"error": "insufficient_permission"}``, and when a token omits its permissions
-    and the live read fails, 503 ``{"error": "permissions_unavailable"}``. An empty
-    list allows nobody. ``organization_param`` names the path parameter that must
-    equal the active organization's id.
+    :class:`~seamless_auth.PermissionRule` answers 403 ``insufficient_permission``, and
+    when a token omits its permissions and the live read fails, 503
+    ``permissions_unavailable``. An empty list allows nobody. ``organization_param``
+    names the path parameter that must equal the active organization's id.
+
+    Every refusal is a :class:`GuardHTTPException`, answered ``{"error": ...}``.
 
     A plain function, so FastAPI runs it on its threadpool: the first sight of a key
     may fetch the auth API's key set.
@@ -170,44 +170,44 @@ class RequireUser:
                 route_params=request.path_params,
             )
         except InsufficientPermission:
-            raise _permission_refusal(request, 403, "insufficient_permission") from None
+            raise _guard_refusal(request, 403, "insufficient_permission") from None
         except PermissionsUnavailable:
-            raise _permission_refusal(request, 503, "permissions_unavailable") from None
+            raise _guard_refusal(request, 503, "permissions_unavailable") from None
         except InsufficientRole:
-            raise HTTPException(status_code=403, detail="insufficient_role") from None
+            raise _guard_refusal(request, 403, "insufficient_role") from None
         except EnrollmentRequired:
-            raise HTTPException(status_code=403, detail="enrollment_required") from None
+            raise _guard_refusal(request, 403, "enrollment_required") from None
         except CrossSiteRequest:
-            raise HTTPException(status_code=403, detail="cross_site_request_blocked") from None
+            raise _guard_refusal(request, 403, "cross_site_request_blocked") from None
         except Unauthenticated:
-            raise HTTPException(status_code=401, detail="unauthenticated") from None
+            raise _guard_refusal(request, 401, "unauthenticated") from None
 
 
-class PermissionHTTPException(HTTPException):
-    """A permission guard's refusal, answered ``{"error": ...}`` as on every other
-    framework and adapter, not FastAPI's ``{"detail": ...}``. To answer it differently,
-    register a handler for this class."""
+class GuardHTTPException(HTTPException):
+    """A guard's refusal, answered ``{"error": ...}`` as on every other framework and
+    adapter, not FastAPI's ``{"detail": ...}``. To answer it differently, register a
+    handler for this class."""
 
     def __init__(self, status_code: int, error: str) -> None:
         super().__init__(status_code, detail=error)
         self.body = {"error": error}
 
 
-def _permission_exception_handler(request: Request, exc: Exception) -> Response:
-    if not isinstance(exc, PermissionHTTPException):
+def _guard_exception_handler(request: Request, exc: Exception) -> Response:
+    if not isinstance(exc, GuardHTTPException):
         raise exc
     return JSONResponse(exc.body, status_code=exc.status_code)
 
 
-def _permission_refusal(request: Request, status: int, error: str) -> PermissionHTTPException:
+def _guard_refusal(request: Request, status: int, error: str) -> GuardHTTPException:
     # A dependency can only raise, and FastAPI's handler for an HTTPException always
     # wraps the body in "detail". An add_exception_handler call would be a second step
     # that, once forgotten, changes the response shape, so the guard registers the
     # handler itself. A handler the application registered wins.
     handlers: Any = request.scope.get("starlette.exception_handlers")
     if handlers is not None:
-        handlers[0].setdefault(PermissionHTTPException, _permission_exception_handler)
-    return PermissionHTTPException(status, error)
+        handlers[0].setdefault(GuardHTTPException, _guard_exception_handler)
+    return GuardHTTPException(status, error)
 
 
 class OptionalUser:
@@ -306,7 +306,7 @@ class RequireBearer:
                 guard.check_route(user, request.path_params)
         except BearerError as err:
             if err.error == "insufficient_permission":
-                raise _permission_refusal(request, err.status, err.error) from None
+                raise _guard_refusal(request, err.status, err.error) from None
             raise BearerHTTPException(err) from None
         return user
 
