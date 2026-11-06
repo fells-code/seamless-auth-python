@@ -66,6 +66,8 @@ current Django, so both are covered. Do not use language or standard library fea
 - `src/seamless_auth/_adapter.py`: `Adapter`, the request pipeline, the upstream call, manifest
   routes, credential resolution (with silent refresh), session verification, refresh, logout, the
   guard, the cross-site check.
+- `src/seamless_auth/_permissions.py`: the permission rule, shared by the session guards and the
+  verify-only guard.
 - `src/seamless_auth/_console.py`: the admin dashboard proxy (`Adapter.console`).
 - `src/seamless_auth/_refresh.py`: refresh sharing across threads (one rotation per refresh token
   while it runs, and for cookie transport only, its result for 5 seconds after).

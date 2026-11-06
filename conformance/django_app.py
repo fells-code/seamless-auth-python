@@ -54,10 +54,34 @@ def me(request: HttpRequest) -> JsonResponse:
     return JsonResponse({"id": user_of(request).id})
 
 
+@require_auth(permissions=["conformance:read", "conformance:other"])
+def permissions_any(request: HttpRequest) -> JsonResponse:
+    return JsonResponse({"id": user_of(request).id})
+
+
+@require_auth(permissions=["conformance:read", "conformance:write"], permission_mode="all")
+def permissions_all(request: HttpRequest) -> JsonResponse:
+    return JsonResponse({"id": user_of(request).id})
+
+
+@require_auth(permissions=["conformance:org"], organization=True)
+def permissions_org(request: HttpRequest) -> JsonResponse:
+    return JsonResponse({"id": user_of(request).id})
+
+
+@require_auth(permissions=["conformance:org"], organization_param="organization_id")
+def permissions_org_bound(request: HttpRequest, organization_id: str) -> JsonResponse:
+    return JsonResponse({"id": user_of(request).id})
+
+
 urlpatterns = [
     path("", health),
     path("__captured/<str:recipient>", captured),
     path("api/me", me),
+    path("api/permissions/any", permissions_any),
+    path("api/permissions/all", permissions_all),
+    path("api/permissions/org", permissions_org),
+    path("api/permissions/org/<str:organization_id>", permissions_org_bound),
     path("auth/", include("seamless_auth.django")),
 ]
 

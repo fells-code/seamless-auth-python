@@ -23,6 +23,14 @@ except ImportError:
 
 auth = Adapter(**_shared.adapter_options())
 current_user = RequireUser(auth)
+any_of = RequireUser(auth, permissions=["conformance:read", "conformance:other"])
+all_of = RequireUser(
+    auth, permissions=["conformance:read", "conformance:write"], permission_mode="all"
+)
+in_organization = RequireUser(auth, permissions=["conformance:org"], organization=True)
+in_route_organization = RequireUser(
+    auth, permissions=["conformance:org"], organization_param="organization_id"
+)
 
 app = FastAPI()
 app.include_router(auth_router(auth))
@@ -40,6 +48,26 @@ def captured(recipient: str) -> dict[str, Any] | None:
 
 @app.get("/api/me")
 def me(user: User = Depends(current_user)) -> dict[str, str]:  # noqa: B008
+    return {"id": user.id}
+
+
+@app.get("/api/permissions/any")
+def permissions_any(user: User = Depends(any_of)) -> dict[str, str]:  # noqa: B008
+    return {"id": user.id}
+
+
+@app.get("/api/permissions/all")
+def permissions_all(user: User = Depends(all_of)) -> dict[str, str]:  # noqa: B008
+    return {"id": user.id}
+
+
+@app.get("/api/permissions/org")
+def permissions_org(user: User = Depends(in_organization)) -> dict[str, str]:  # noqa: B008
+    return {"id": user.id}
+
+
+@app.get("/api/permissions/org/{organization_id}")
+def permissions_org_bound(user: User = Depends(in_route_organization)) -> dict[str, str]:  # noqa: B008
     return {"id": user.id}
 
 

@@ -11,7 +11,7 @@ import math
 import re
 import threading
 import time
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, TypeGuard
 from urllib.parse import urlsplit
@@ -22,6 +22,7 @@ from jwt.algorithms import RSAAlgorithm
 from ._http import Headers
 from ._jwks import FETCH_TIMEOUT, JwksCache, TokenError, read_limited
 from ._jwt import CLOCK_SKEW_SECONDS
+from ._permissions import PermissionMode, PermissionRule, permission_names
 
 log = logging.getLogger("seamless_auth")
 
@@ -87,6 +88,12 @@ class VerifiedUser:
     verified_at: float = 0
     claims: dict[str, Any] = field(default_factory=dict, repr=False, compare=False)
     token: str = field(default="", repr=False)
+    permissions: tuple[str, ...] = ()
+    organization_roles: tuple[str, ...] = ()
+    organization_permissions: tuple[str, ...] = ()
+    #: The token left its permissions out. The verify-only guard denies then: the
+    #: first-party endpoint that holds the live set refuses provider tokens.
+    permissions_omitted: bool = False
 
     @property
     def is_client(self) -> bool:
@@ -297,6 +304,10 @@ class ResourceServer:
             verified_at=now,
             claims=claims,
             token=token,
+            permissions=permission_names(claims.get("permissions")),
+            organization_roles=permission_names(claims.get("org_roles")),
+            organization_permissions=permission_names(claims.get("org_permissions")),
+            permissions_omitted=claims.get("permissions_omitted") is True,
         )
 
     def _confirmed(self, cnf: Any, request: BearerRequest | None) -> bool:
@@ -326,6 +337,10 @@ class Guard:
     def check(self, user: VerifiedUser) -> None:
         raise NotImplementedError
 
+    def check_route(self, user: VerifiedUser, route_params: Mapping[str, Any]) -> None:
+        """:meth:`check`, for a guard that also reads the route. The bindings call this."""
+        self.check(user)
+
 
 class _ScopeGuard(Guard):
     def __init__(self, scopes: tuple[str, ...]) -> None:
@@ -348,6 +363,20 @@ class _RoleGuard(Guard):
     def check(self, user: VerifiedUser) -> None:
         if not any(role_grants_access(g, r) for r in self.roles for g in user.roles):
             raise BearerError(403, {"error": "insufficient_role"}, None)
+
+
+class _PermissionGuard(Guard):
+    def __init__(self, rule: PermissionRule) -> None:
+        self.rule = rule
+
+    def check(self, user: VerifiedUser) -> None:
+        self.check_route(user, {})
+
+    def check_route(self, user: VerifiedUser, route_params: Mapping[str, Any]) -> None:
+        if user.permissions_omitted or not self.rule.allows(
+            user.permissions, user.organization_permissions, user.org_id, route_params
+        ):
+            raise BearerError(403, {"error": "insufficient_permission"}, None)
 
 
 class _StepUpGuard(Guard):
@@ -408,6 +437,20 @@ def require_role(*roles: str) -> Guard:
     403 ``insufficient_role``."""
     _check_names("require_role", roles)
     return _RoleGuard(tuple(roles))
+
+
+def require_permission(
+    *permissions: str,
+    mode: PermissionMode = "any",
+    organization: bool = False,
+    organization_param: str | None = None,
+) -> Guard:
+    """The token must meet a :class:`~seamless_auth.PermissionRule`. Otherwise 403
+    ``insufficient_permission``, without naming the permissions. No permissions at
+    all allows nobody. Provider tokens do not carry these claims yet, so this denies
+    them until fells-code/seamless-auth-oidc-provider#47. A token with
+    ``permissions_omitted`` is denied, not read live."""
+    return _PermissionGuard(PermissionRule(permissions, mode, organization, organization_param))
 
 
 def require_step_up(
