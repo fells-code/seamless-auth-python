@@ -628,6 +628,24 @@ cookies, so the next request tries again:
 | gets a 2xx with no session, or one that fails verification | 502 `upstream_unavailable` |
 | waits on another request's rotation for it and times out | 502 `upstream_unavailable` |
 
+### Several instances
+
+Refresh sharing lives in one process. With several adapter instances (several workers, pods or
+hosts) behind one site, two of them can present the same refresh token at once. This needs the
+auth API release that ships the refresh replay window
+([seamless-auth-api#613](https://github.com/fells-code/seamless-auth-api/pull/613)). Within the
+window, 5 seconds by default (`REFRESH_REPLAY_WINDOW_SECONDS` on the API, 0 disables it, capped
+at 60), and for at most 3 replays, the API answers every caller with the same successor: the same
+refresh token, session id, `refreshTtl`, `sub`, `roles` and `organizationId`. The access token is
+minted per call, so it differs but carries the same `sid`. Each instance therefore writes the same
+refresh cookie and no user is logged out, and no shared lock, cache or sticky routing is needed.
+That holds while the requests reach the API, and your clocks agree, within the window.
+
+A token presented after the window or past the replay count, or an older ancestor, is answered
+401 `refresh_token_reused` and the API revokes the session chain. The adapter treats any 401 as
+terminal: it clears the cookies and never retries. Against an API without the window, concurrent
+refreshes from separate instances still log the user out.
+
 ## The manifest
 
 On its first request the adapter fetches `/.well-known/seamless-adapter.json` from the auth API
