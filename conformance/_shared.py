@@ -43,6 +43,8 @@ def adapter_options() -> dict[str, Any]:
         "cookie_secret": os.environ.get("COOKIE_SIGNING_KEY", ""),
         "service_secret": os.environ.get("SEAMLESS_SERVICE_TOKEN", ""),
         "jwks_kid": os.environ.get("JWKS_KID") or None,
+        # The contract's reference cookies are SameSite=None, not the Lax default.
+        "same_site": "None",
         "deliver": capture,
         "resolve_client_ip": one_trusted_hop,
     }

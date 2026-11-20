@@ -62,7 +62,7 @@ def test_a_sign_in_sets_every_cookie_and_skips_csrf(api: FakeApi, client: Client
     assert r.status_code == 200, r.content
     assert set(r.cookies) == {"seamless-access", "seamless-refresh"}
     morsel = r.cookies["seamless-access"]
-    assert morsel["httponly"] and morsel["secure"] and morsel["samesite"] == "None"
+    assert morsel["httponly"] and morsel["secure"] and morsel["samesite"] == "Lax"
     assert morsel["path"] == "/" and morsel["max-age"] == 900
     assert "token" not in r.json()
 
@@ -140,6 +140,43 @@ def test_the_guard(client: Client) -> None:
     other = signed_cookie("seamless-access", {"sub": "u1", "token": api_token("u2", "access")})
     assert client.get("/api/me", HTTP_COOKIE=other).status_code == 401
     assert client.get("/api/me-async", HTTP_COOKIE=other).status_code == 401
+
+
+def test_the_guard_matches_the_origin_to_the_host(client: Client) -> None:
+    session_cookie = signed_cookie(
+        "seamless-access", {"sub": "u1", "token": api_token("u1", "access")}
+    )
+
+    def post(**meta: str) -> int:
+        return client.post("/api/transfer", HTTP_COOKIE=session_cookie, **meta).status_code
+
+    host = {"HTTP_HOST": "app.example"}
+    assert post(**host, HTTP_SEC_FETCH_SITE="same-site", HTTP_ORIGIN="https://app.example") == 200
+    assert post(**host, HTTP_ORIGIN="https://app.example") == 200
+    assert (
+        post(**host, HTTP_SEC_FETCH_SITE="same-site", HTTP_ORIGIN="https://evil.app.example") == 403
+    )
+    assert post(**host, HTTP_ORIGIN="https://evil.app.example") == 403
+    assert post(**host, HTTP_SEC_FETCH_SITE="same-site") == 403
+    assert post(**host, HTTP_SEC_FETCH_SITE="same-planet", HTTP_ORIGIN="https://app.example") == 403
+
+
+def test_auth_routes_match_the_origin_to_the_host(api: FakeApi, client: Client) -> None:
+    api.on("POST", "/login", respond(400, {"error": "invalid_request"}))
+
+    def login(origin: str) -> Any:
+        return client.post(
+            "/auth/login",
+            data="{}",
+            content_type="application/json",
+            HTTP_HOST="app.example",
+            HTTP_SEC_FETCH_SITE="same-site",
+            HTTP_ORIGIN=origin,
+        )
+
+    assert login("https://app.example").status_code == 400
+    r = login("https://evil.app.example")
+    assert (r.status_code, r.json()) == (403, {"error": "cross_site_request_blocked"})
 
 
 def test_the_guard_refuses_a_recovery_session_unless_allowed(client: Client) -> None:

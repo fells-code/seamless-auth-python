@@ -156,6 +156,43 @@ def test_the_guard(api: FakeApi) -> None:
     assert client.get("/api/me", headers={"cookie": other}).status_code == 401
 
 
+def test_the_guard_matches_the_origin_to_the_host(api: FakeApi) -> None:
+    client = app_for(api.adapter())
+    session_cookie = signed_cookie(
+        "seamless-access", {"sub": "u1", "token": api_token("u1", "access")}
+    )
+
+    def post(**headers: str) -> int:
+        sent = {"cookie": session_cookie, **{k.replace("_", "-"): v for k, v in headers.items()}}
+        return client.post("/api/transfer", headers=sent).status_code
+
+    # TestClient sends Host: testserver.
+    assert post(sec_fetch_site="same-site", origin="http://testserver") == 200
+    assert post(origin="http://testserver") == 200
+    assert post(sec_fetch_site="same-site", origin="http://evil.testserver") == 403
+    assert post(origin="http://evil.testserver") == 403
+    assert post(sec_fetch_site="same-site") == 403
+    assert post(sec_fetch_site="same-planet", origin="http://testserver") == 403
+    assert post(host="evil.testserver", origin="http://evil.testserver") == 200
+
+
+def test_auth_routes_match_the_origin_to_the_host(api: FakeApi) -> None:
+    api.on("POST", "/login", respond(400, {"error": "invalid_request"}))
+    client = app_for(api.adapter())
+
+    def login(origin: str) -> int:
+        headers = {"sec-fetch-site": "same-site", "origin": origin}
+        return client.post("/auth/login", json={}, headers=headers).status_code
+
+    assert login("http://testserver") == 400
+    r = client.post(
+        "/auth/login",
+        json={},
+        headers={"sec-fetch-site": "same-site", "origin": "http://evil.test"},
+    )
+    assert (r.status_code, r.json()) == (403, {"error": "cross_site_request_blocked"})
+
+
 def test_the_guard_refuses_a_recovery_session_unless_allowed(api: FakeApi) -> None:
     client = app_for(api.adapter())
     recovery = {"authorization": f"Bearer {api_token('u1', 'access', recovery=True)}"}
