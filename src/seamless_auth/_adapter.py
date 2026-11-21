@@ -276,7 +276,7 @@ class Adapter:
         if cookie_domain is not None and not _COOKIE_DOMAIN.match(cookie_domain):
             raise ValueError(f"seamless-auth: invalid cookie domain {cookie_domain!r}")
         if same_site is None:
-            same_site = "Lax" if insecure_cookies else "None"
+            same_site = "Lax"
         if same_site not in ("Strict", "Lax", "None"):
             raise ValueError("seamless-auth: same_site must be Strict, Lax or None")
         if not jwks_kid:
@@ -1096,18 +1096,20 @@ class Adapter:
         if origin is not None and origin.strip().lower() == "null":
             return blocked
         site = (headers.get("sec-fetch-site") or "").lower()
-        if site == "cross-site":
-            return blocked
         if site in ("same-origin", "none"):
             return None
+        # An unknown value is a browser this check does not understand, so it is
+        # treated as cross-site rather than trusted.
+        if site and site != "same-site":
+            return blocked
         # same-site also covers a sibling subdomain, and a request with no fetch
         # metadata could come from anywhere, so the Origin is what decides. With
         # neither header it is no browser form, and the body gate still applies.
-        if origin is None and not site:
-            return None
+        if origin is None:
+            return None if not site else blocked
         if self._config.allowed_origins is None:
-            return None
-        return None if origin is not None and self._is_allowed_origin(origin) else blocked
+            return None if _origin_matches_host(origin, headers.get("host")) else blocked
+        return None if self._is_allowed_origin(origin) else blocked
 
     def _is_allowed_origin(self, origin: str) -> bool:
         normalized = _normalize_origin(origin)
@@ -1366,6 +1368,27 @@ def _is_explicit_json(content_type: str | None) -> bool:
     """A request content type that names JSON. Unlike a response, a request with a
     body and no content type is not taken for JSON."""
     return bool(content_type and content_type.strip()) and _is_json_content_type(content_type)
+
+
+_DEFAULT_PORTS = {"http": "80", "https": "443"}
+
+
+def _origin_matches_host(origin: str, host: str | None) -> bool:
+    """Whether the Origin names the host the request was sent to. Only the host and
+    port are compared: a proxy that ends TLS still passes the browser's Host on."""
+    normalized = _normalize_origin(origin)
+    if not normalized or not host or not host.strip():
+        return False
+    scheme, _, origin_host = normalized.partition("://")
+    default = _DEFAULT_PORTS.get(scheme)
+
+    def bare(value: str) -> str:
+        value = value.strip().lower()
+        if default is not None and value.endswith(f":{default}"):
+            return value[: -len(default) - 1]
+        return value
+
+    return bare(origin_host) == bare(host)
 
 
 def _normalize_origin(origin: str) -> str | None:

@@ -140,16 +140,23 @@ subdomain is same-site, so `SameSite=Lax` or `Strict` still sends it the cookies
 
 - `Origin: null` (in any case, with any surrounding space) answers 403, checked first, whatever
   `Sec-Fetch-Site` and `allowed_origins` say.
-- `Sec-Fetch-Site: cross-site` answers 403.
+- `Sec-Fetch-Site: cross-site`, or any value other than `same-origin`, `same-site` and `none`,
+  answers 403.
 - `Sec-Fetch-Site: same-origin` (or `none`) passes.
 - `Sec-Fetch-Site: same-site` also covers a sibling subdomain, and a request with no
   `Sec-Fetch-Site` could come from anywhere, so for both the `Origin` decides. When
-  `allowed_origins` is set, the request must carry an `Origin` on that list, or it answers 403. Without `allowed_origins` it passes, and on the auth routes the body rule below
-  is what stops a form.
+  `allowed_origins` is set, the request must carry an `Origin` on that list, or it answers 403.
+  Without `allowed_origins`, the `Origin` host and port must equal the request's `Host` (a
+  default port is ignored), or it answers 403. A `same-site` request with no `Origin` answers 403
+  either way.
 - A request with neither `Sec-Fetch-Site` nor `Origin` is not a browser form, so it passes, with
   or without `allowed_origins`. On the auth routes the body rule below still applies to it.
 - `allowed_origins=[]` is strict: no `Origin` is on it, so a same-site request, or one with an
   `Origin` and no `Sec-Fetch-Site`, answers 403.
+
+The `Host` check needs the browser's `Host` to reach the app. A proxy that rewrites `Host`, or a
+frontend served from another origin than the API, needs `allowed_origins` listing the frontend's
+origin.
 
 A bearer token is never attached by a browser, so the guard does not check a request it admits on
 one. The auth routes check every state change, bearer transport (`x-seamless-auth-transport:
@@ -293,8 +300,8 @@ form post answers 415 too. `POST /auth/refresh`, `DELETE /auth/logout` and
 | `jwks_kid` | `dev-main` | `kid` header on service tokens |
 | `cookie_domain` | none | Cookie `Domain` |
 | `insecure_cookies` | `False` | Drops `Secure`, and allows placeholder secrets, for local development over HTTP |
-| `same_site` | `None`, or `Lax` with `insecure_cookies` | Cookie `SameSite` |
-| `allowed_origins` | none | The only origins allowed to change state from a same-site page or without fetch metadata; `[]` allows none |
+| `same_site` | `Lax` | Cookie `SameSite`. A frontend on another site than the API needs `None` |
+| `allowed_origins` | none (the `Origin` must match `Host`) | The only origins allowed to change state from a same-site page or without fetch metadata; `[]` allows none |
 | `access_cookie_name`, `refresh_cookie_name` | `seamless-access`, `seamless-refresh` | Session cookie names |
 | `registration_cookie_name`, `pre_auth_cookie_name` | `seamless-ephemeral` | Sign-in flow cookie names |
 | `deliver` | none | Sends OTP codes and magic links through your own transports |

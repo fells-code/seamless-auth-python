@@ -59,9 +59,9 @@ def test_login_stores_the_pre_auth_token_and_picks_the_body(api: FakeApi) -> Non
     assert r.body["identifierType"] == "email"
     cookie = r.cookies["seamless-ephemeral"]
     assert cookie.max_age == 300
-    assert cookie.http_only and cookie.secure and cookie.same_site == "None" and cookie.path == "/"
+    assert cookie.http_only and cookie.secure and cookie.same_site == "Lax" and cookie.path == "/"
     header = cookie.header()
-    for part in ("Path=/", "Max-Age=300", "HttpOnly", "Secure", "SameSite=None"):
+    for part in ("Path=/", "Max-Age=300", "HttpOnly", "Secure", "SameSite=Lax"):
         assert part in header
 
 
@@ -670,13 +670,16 @@ ORIGIN_CASES = [
     # (allowlist, same_site, method, sec-fetch-site, origin, blocked)
     (None, "None", "POST", "cross-site", None, True),
     (None, "None", "POST", "same-origin", None, False),
-    # Without an allowlist the body gate is what stops a sibling's form.
-    (None, "None", "POST", "same-site", None, False),
-    (None, "None", "POST", "same-site", "https://evil.example", False),
+    # Without an allowlist the Origin must match Host, and these send no Host.
+    (None, "None", "POST", "same-site", None, True),
+    (None, "None", "POST", "same-site", "https://evil.example", True),
     (None, "None", "POST", "same-site", "null", True),
     (None, "None", "POST", None, None, False),
     (None, "None", "POST", None, "null", True),
-    (None, "None", "POST", None, "https://evil.example", False),
+    (None, "None", "POST", None, "https://evil.example", True),
+    # An unknown fetch metadata value is taken for cross-site.
+    (None, "None", "POST", "same-planet", None, True),
+    ((APP,), "None", "POST", "same-planet", APP, True),
     (None, "None", "GET", "cross-site", None, False),
     (None, "None", "OPTIONS", "cross-site", None, False),
     # Whatever the SameSite setting.
@@ -742,6 +745,80 @@ def test_the_origin_check(api: FakeApi, case: OriginCase) -> None:
         assert not api.calls_to(method, "/login")
     else:
         assert r.status != 403, r.text
+
+
+HOST_CASES = [
+    # (host, sec-fetch-site, origin, blocked)
+    ("app.example", None, APP, False),
+    ("app.example", "same-site", APP, False),
+    ("APP.example", "same-site", "https://app.EXAMPLE", False),
+    ("app.example:443", "same-site", APP, False),
+    ("app.example", None, "https://app.example:443", False),
+    ("app.example:8443", None, "https://app.example:8443", False),
+    ("localhost:8000", None, "http://localhost:8000", False),
+    ("[::1]:8000", None, "http://[::1]:8000", False),
+    # A sibling subdomain is same-site, but not the host the request was sent to.
+    ("app.example", "same-site", SIBLING, True),
+    ("app.example", None, SIBLING, True),
+    ("app.example", None, "https://evil.example", True),
+    ("app.example", None, "https://app.example:8443", True),
+    ("app.example:8443", None, APP, True),
+    ("app.example", None, "http://app.example:443", True),
+    ("app.example", "same-site", None, True),
+    ("app.example", None, "not an origin", True),
+    (None, None, APP, True),
+    ("", None, APP, True),
+    # Fetch metadata that settles it still does, Host or not.
+    ("app.example", "cross-site", APP, True),
+    ("app.example", "same-origin", SIBLING, False),
+    ("app.example", None, None, False),
+]
+
+
+@pytest.mark.parametrize(("host", "site", "origin", "blocked"), HOST_CASES)
+def test_without_an_allowlist_the_origin_must_match_the_host(
+    api: FakeApi, host: str | None, site: str | None, origin: str | None, blocked: bool
+) -> None:
+    api.on("POST", "/login", respond(400, {"error": "invalid_request"}))
+    adapter = api.adapter()
+    headers = {
+        k: v
+        for k, v in (("host", host), ("sec-fetch-site", site), ("origin", origin))
+        if v is not None
+    }
+
+    r = call(adapter, "POST", "/login", body="{}", headers=headers)
+
+    if blocked:
+        assert (r.status, r.body) == (403, {"error": "cross_site_request_blocked"})
+        assert not api.calls_to("POST", "/login")
+    else:
+        assert r.status != 403, r.text
+
+
+def test_the_allowlist_replaces_the_host_check(api: FakeApi) -> None:
+    api.on("POST", "/login", respond(400, {"error": "invalid_request"}))
+    adapter = api.adapter(allowed_origins=["https://web.example"])
+
+    def status(origin: str) -> int:
+        headers = {"host": "api.example", "sec-fetch-site": "same-site", "origin": origin}
+        return call(adapter, "POST", "/login", body="{}", headers=headers).status
+
+    assert status("https://web.example") != 403
+    assert status("https://api.example") == 403
+
+
+def test_cookies_default_to_same_site_lax(api: FakeApi) -> None:
+    api.on(
+        "POST",
+        "/login",
+        respond(200, {"sub": "u1", "ttl": 300, "token": api_token("u1", "ephemeral")}),
+    )
+    for adapter in (api.adapter(), api.adapter(insecure_cookies=True)):
+        r = call(adapter, "POST", "/login", body="{}")
+        assert r.cookies["seamless-ephemeral"].same_site == "Lax"
+    r = call(api.adapter(same_site="None"), "POST", "/login", body="{}")
+    assert r.cookies["seamless-ephemeral"].same_site == "None"
 
 
 # Cookie-authenticated routes a forged form POST can drive with no body at all.
