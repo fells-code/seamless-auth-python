@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.7.0](https://github.com/fells-code/seamless-auth-python/compare/v0.6.0...v0.7.0) (2026-11-21)
+
+
+### ⚠ BREAKING CHANGES
+
+* **csrf:** auth cookies default to SameSite=Lax instead of None. A frontend on another site than the API must pass same_site="None". Without allowed_origins, a state-changing request whose Origin does not match Host now answers 403 cross_site_request_blocked, as does a same-site request with no Origin or an unknown Sec-Fetch-Site value. A frontend on another origin than the API, or a proxy that rewrites Host, must list the frontend's origin in allowed_origins.
+
+### Fixed
+
+* **csrf:** require Origin to match Host without an allow-list and default to SameSite=Lax ([#47](https://github.com/fells-code/seamless-auth-python/issues/47)) ([7389c25](https://github.com/fells-code/seamless-auth-python/commit/7389c25ecb4e8df8da51f22751d9ca31decd939a))
+* document multi-instance refresh and test replayed rotations ([#42](https://github.com/fells-code/seamless-auth-python/issues/42)) ([#44](https://github.com/fells-code/seamless-auth-python/issues/44)) ([c0bab46](https://github.com/fells-code/seamless-auth-python/commit/c0bab46abf5b5a5c439e05adc03648f64ca6dc19))
+* **manifest:** sync the bundled adapter manifest with the API ([#45](https://github.com/fells-code/seamless-auth-python/issues/45)) ([df48635](https://github.com/fells-code/seamless-auth-python/commit/df48635015b12b315250a28f0c5135bda460a378))
+
 ## [0.6.0](https://github.com/fells-code/seamless-auth-python/compare/v0.5.0...v0.6.0) (2026-11-06)
 
 
